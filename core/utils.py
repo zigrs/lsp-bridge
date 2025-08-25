@@ -239,7 +239,18 @@ def epc_arg_transformer(arg):
         # transform [Symbol(":a"), 1, Symbol(":b"), 2] to dict(a=1, b=2)
         ret = dict()
         for i in range(0, len(arg), 2):
-            ret[arg[i].value()[1:]] = epc_arg_transformer(arg[i + 1])
+            key = arg[i].value()[1:]
+            value = epc_arg_transformer(arg[i + 1])
+            
+            # Special handling for LSP protocol boolean fields
+            # These fields must be boolean type for LSP compliance (especially for Go's LSP)
+            boolean_lsp_fields = ["ResolveEdits", "resolveProvider", "triggerForIncompleteCompletions"]
+            if key in boolean_lsp_fields and value not in [True, False]:
+                # Convert non-boolean values to False for safety
+                value = False
+                logger.debug(f"LSP Protocol: Converting {key} to boolean: {value}")
+            
+            ret[key] = value
         return ret
     else:
         return list(map(epc_arg_transformer, arg))
