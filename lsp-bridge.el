@@ -98,6 +98,7 @@
 (require 'lsp-bridge-dart)
 (require 'lsp-bridge-semantic-tokens)
 (require 'lsp-bridge-rust)
+(require 'lsp-bridge-breadcrumb)
 
 (defgroup lsp-bridge nil
   "LSP-Bridge group."
@@ -506,6 +507,11 @@ which refer to https://docs.python.org/3/library/logging.html#levels for more de
 Possible choices are basedpyright, pyright, pyright-background-analysis, jedi, python-ms, pylsp, and ruff."
   :type 'string)
 
+(defcustom lsp-bridge-ruby-lsp-server "solargraph"
+  "Default LSP server for Ruby.
+Possible choices are `solargraph', `ruby-lsp'."
+  :type 'string)
+
 (defcustom lsp-bridge-python-multi-lsp-server "basedpyright_ruff"
   "Default Multi LSP server for Python.
 Possible choices are basedpyright_ruff, pyright_ruff, pyright-background-analysis_ruff, jedi_ruff, python-ms_ruff, and pylsp_ruff."
@@ -571,7 +577,7 @@ If nil, lsp-bridge would try to detect by default."
     ((java-mode java-ts-mode) .                                                  "jdtls")
     ((julia-mode) .                                                              "julials")
     ((python-mode python-ts-mode) .                                              lsp-bridge-python-lsp-server)
-    ((ruby-mode ruby-ts-mode) .                                                  "solargraph")
+    ((ruby-mode ruby-ts-mode) .                                                  lsp-bridge-ruby-lsp-server)
     ((rust-mode rustic-mode rust-ts-mode rstml-ts-mode) .                        "rust-analyzer")
     (move-mode .                                                                 "move-analyzer")
     ((elixir-mode elixir-ts-mode heex-ts-mode) .                                 lsp-bridge-elixir-lsp-server)
@@ -581,7 +587,7 @@ If nil, lsp-bridge would try to detect by default."
     ((lua-mode lua-ts-mode)  .                                                   lsp-bridge-lua-lsp-server)
     ((markdown-mode gfm-mode) .                                                  lsp-bridge-markdown-lsp-server)
     (dart-mode .                                                                 "dart-analysis-server")
-    (scala-mode .                                                                "metals")
+    ((scala-mode scala-ts-mode) .                                                "metals")
     ((js2-mode js-mode js-ts-mode rjsx-mode) .                                   "javascript")
     (js-jsx-mode .                                                               "javascriptreact")
     ((typescript-tsx-mode tsx-ts-mode) .                                         "typescriptreact")
@@ -681,6 +687,7 @@ If nil, lsp-bridge would try to detect by default."
     haskell-literate-mode-hook
     dart-mode-hook
     scala-mode-hook
+    scala-ts-mode-hook
     typescript-mode-hook
     typescript-tsx-mode-hook
     js2-mode-hook
@@ -892,6 +899,7 @@ you can customize `lsp-bridge-get-workspace-folder' to return workspace folder p
     (rstml-ts-mode              . rust-ts-mode-indent-offset) ; Rust
     (rustic-mode                . rustic-indent-offset)       ; Rust
     (scala-mode                 . scala-indent:step)          ; Scala
+    (scala-ts-mode              . scala-indent:step)          ; Scala
     (powershell-mode            . powershell-indent)      ; PowerShell
     (ess-mode                   . ess-indent-offset)      ; ESS (R)
     (yaml-mode                  . yaml-indent-offset)     ; YAML

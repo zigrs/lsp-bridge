@@ -259,6 +259,7 @@ lsp-bridge 针对许多语言都提供 2 个以上的语言服务器支持， �
 - `lsp-bridge-c-lsp-server`: C 语言的服务器， 可以选择`clangd`或者`ccls`
 - `lsp-bridge-elixir-lsp-server`: Elixir 语言的服务器， 可以选择`elixirLS`,`lexical`或者`nextls`
 - `lsp-bridge-python-lsp-server`: Python 语言的服务器， 可以选择 `basedpyright`, `pyright`, `jedi`, `python-ms`, `pylsp`, `ruff`, 需要注意的是, `lsp-bridge-multi-lang-server-mode-list` 的优先级高于 `lsp-bridge-single-lang-server-mode-list`, 如果你只想使用单服务器， 请先去掉 `lsp-bridge-multi-lang-server-mode-list` 中 python-mode 的设置
+- `lsp-bridge-ruby-lsp-server`: Ruby 语言的服务器， 可以选择 `solargraph`, `ruby-lsp`
 - `lsp-bridge-php-lsp-server`: PHP 语言的服务器， 可以选择`intelephense`或者`phpactor`
 - `lsp-bridge-tex-lsp-server`: LaTeX 语言的服务器， 可以选择`texlab`,`digestif`或者`ltex-ls`
 - `lsp-bridge-csharp-lsp-server`: C#语言的服务器， 可以选择`omnisharp-mono`, `omnisharp-dotnet` 或者 `csharp-ls`, 注意你需要给 OmniSharp 文件**执行权限**才能正常工作
@@ -320,7 +321,7 @@ lsp-bridge 针对许多语言都提供 2 个以上的语言服务器支持， �
 - `acm-enable-doc-markdown-render`: 对补全文档中的 Markdown 内容进行语法着色， 你可以选择`'async`, `t` 或者 `nil`. 当选择`'async` 时, lsp-bridge 会采用异步渲， 当选择 `t` 时, lsp-bridge 会采用同步渲染， 同步渲染会降低补全速度， 默认是 `async` 选项
 - `acm-enable-tabnine`: 是否打开 tabnine 补全支持， 默认打开， 打开后需要运行命令 `lsp-bridge-install-tabnine` 来安装 tabnine 后就可以使用了。 TabNine 会消耗巨大的 CPU， 导致你整个电脑都卡顿， 如果电脑性能不好， 不建议开启此选项
 - `acm-enable-codeium`: 是否打开 Codeium 补全支持， 打开后需要运行命令 `lsp-bridge-install-update-codeium` 来安装 Codeium， 再运行命令 `lsp-bridge-codeium-auth` 来获取 auth token 再运行命令 `lsp-bridge-codeium-input-auth-token` 获取 API Key 后就可以使用了。
-- `acm-enable-copilot`: 是否打开 Copilot 补全支持. 首先购买 Copilot 的服务 https://github.com/features/copilot , 打开后需要运行终端命令 `npm install -g @github/copilot-language-server` 来安装 Copilot， 再运行命令 `lsp-bridge-copilot-login`, lsp-bridge 会在 Minibuffer 显示 User Code, 复制 User Code 到打开的 Copilot 页面完成登录。 （中国用户要确认代理配置好才能正常登录 Copilot ）
+- `acm-enable-copilot`: 启用 Copilot 支持。首先，需要在 [https://github.com/features/copilot](https://github.com/features/copilot) 购买 Copilot 服务。启用时，Copilot 可以通过两种方式运行：一种是通过 Node.js 安装（`npm install -g @github/copilot-language-server`），另一种是使用 copilot-language-server 的二进制文件/安装包。使用哪种方式由变量 `acm-backend-copilot-launch-mode` 控制，可以设置为 `auto`、`node` 或 `binary`。默认值为 `auto`，它会先尝试使用 Node.js，如果失败则尝试二进制文件。`acm-backend-copilot-node-path` 可以用来指定 Node.js 的路径（默认值：`node`），`acm-backend-copilot-binary-path` 用来指定二进制文件的路径（默认值：`copilot-language-server`）。完成安装后，执行 `lsp-bridge-copilot-login`，lsp-bridge 会在 Minibuffer 中显示一个用户代码，将其复制到 Copilot 页面以完成登录。（中国用户要确认代理配置好才能正常登录 Copilot ）
 - `acm-enable-search-file-words`: 补全菜单是否显示打开文件的单词， 默认打开
 - `acm-enable-quick-access`: 是否在图标后面显示索引， 通过 Alt + Number 来快速选择候选词， 默认关闭
 - `acm-quick-access-use-number-select`: 是否用数字键快速选择候选词， 默认关闭， 打开这个选项会导致有时候干扰数字输入或误选候选词
@@ -328,6 +329,7 @@ lsp-bridge 针对许多语言都提供 2 个以上的语言服务器支持， �
 - `acm-enable-citre`: [citre(ctags)](https://github.com/universal-ctags/citre) 补全， 默认关闭
 - `acm-enable-lsp-workspace-symbol`: LSP 符号补全， 默认关闭
 - `acm-doc-frame-max-lines`: 帮助窗口的最大行数， 默认是 20
+- `acm-doc-frame-boundary`: 文档框架的边界约束策略，选项包括 `'parent-frame`、`'display`，默认为 `'parent-frame`。`'parent-frame` 将文档框架限制在父 Emacs 窗口内，`'display` 允许文档框架超出 Emacs 窗口但不超出显示器边界
 - `acm-candidate-match-function`: lsp-bridge 前端对补全候选词的过滤算法， 选项有 `'regexp-quote`, `'orderless-flex`, `'orderless-literal`, `'orderless-prefixes`, `'orderless-regexp`, `'orderless-initialism`, 默认为 `regexp-quote`， orderless-\* 开头的算法需要额外安装 [orderless](https://github.com/oantolin/orderless)
 - `acm-completion-mode-candidates-merge-order`: 模式补全的显示顺序， 默认是按照 Elisp、 LSP、 Jupyter、 Ctags、 Citre、 ROAM、 单词、 Telegra 的顺序显示， 你可以根据你的需求调整模式补全的显示顺序
 - `acm-backend-lsp-candidate-min-length`: LSP 补全最小的触发字符数, 默认是 0
@@ -449,6 +451,7 @@ lsp-bridge 针对许多语言都提供 2 个以上的语言服务器支持， �
 | Rego        | [regal](https://github.com/StyraInc/regal)                                               |                                                                                                                                                                                                                                |
 | Robot        | [vscode-rf-language-server](https://github.com/tomi/vscode-rf-language-server)                                               | `pip install robotframework --user`                                                                                                                                                                                                                               |
 | Ruby        | [solargraph](https://github.com/castwide/solargraph)                                               |                                                                                                                                                                                                                               |
+|             | [ruby-lsp](https://github.com/Shopify/ruby-lsp)                                               |                                                                                                                                                                                                                               |
 | Rust        | [rust-analyzer](https://github.com/rust-lang/rust-analyzer)                                        |                                                                                                                                                                                                                               |
 | SASS        | [emmet-ls](https://github.com/aca/emmet-ls)                                                        | `npm install -g emmet-ls`                                                                                                                                                                                                     |
 | Scala       | [metals](https://scalameta.org/metals/)                                                            |                                                                                                                                                                                                                               |
