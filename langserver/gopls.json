@@ -11,7 +11,14 @@
     "gopls": {
       "usePlaceholders": true,
       "completeUnimported": true,
-      "staticcheck": true
+      "staticcheck": true,
+      "gofumpt":true,
+      "analyses":{
+        "nilness": true,
+        "unusedparams": true,
+        "unusedwrite": true,
+        "useany": true
+      }
     }
   }
 }

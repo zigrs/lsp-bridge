@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Dict, Tuple
 
 from core.handler import *
 from core.handler import Diagnostic
-from core.lspserver import LspServer
+from core.lspserver import LspServer, WORKSPACE_DIAGNOSTICS
 from core.utils import *
 
 if TYPE_CHECKING:
@@ -357,6 +357,45 @@ class FileAction:
             message_emacs("No diagnostics found.")
         else:
             eval_in_emacs("lsp-bridge-diagnostic--list", self.get_diagnostics(hide_severities))
+
+    def workspace_list_diagnostics(self, hide_severities):
+        """List diagnostics across the workspace (including unopened files).
+
+        This aggregates diagnostics cached from server push (publishDiagnostics)
+        as well as results collected via workspace/diagnostic (if requested).
+        """
+        # Determine project path from any associated server
+        project_path = None
+        servers = []
+        if self.multi_servers:
+            servers = list(self.multi_servers.values())
+        elif self.single_server:
+            servers = [self.single_server]
+        for s in servers:
+            project_path = getattr(s, 'project_path', None)
+            if project_path:
+                break
+
+        diagnostics = []
+        if project_path and project_path in WORKSPACE_DIAGNOSTICS:
+            proj = WORKSPACE_DIAGNOSTICS[project_path]
+            for filepath, server_map in proj.items():
+                for server_name, diags in server_map.items():
+                    for d in diags:
+                        if hide_severities and d.get("severity", 1) in hide_severities:
+                            continue
+                        d_copy = dict(d)
+                        d_copy["server-name"] = server_name
+                        d_copy["filepath"] = filepath
+                        diagnostics.append(d_copy)
+
+        # Sort by filepath, then range start
+        def diag_key(d):
+            r = d.get("range", {}).get("start", {})
+            return (d.get("filepath", ""), r.get("line", 0), r.get("character", 0))
+        diagnostics.sort(key=diag_key)
+
+        eval_in_emacs("lsp-bridge-workspace-diagnostic--list", diagnostics)
 
     def sort_diagnostic(self, diagnostic_a, diagnostic_b):
         score_a = [diagnostic_a["range"]["start"]["line"],

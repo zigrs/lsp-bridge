@@ -31,11 +31,13 @@ from subprocess import PIPE
 from sys import stderr
 from typing import TYPE_CHECKING, Dict
 from urllib.parse import urlparse
+# On macOS prefer FSEvents (native, efficient recursive watching)
 if platform.system() == "Darwin":
-    from watchdog.observers.kqueue import KqueueObserver
+    from watchdog.observers.fsevents import FSEventsObserver as KqueueObserver
 else:
     from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
+import fnmatch
 
 from core.handler import Handler
 from core.mergedeep import merge
@@ -48,20 +50,39 @@ DEFAULT_BUFFER_SIZE = 100000000  # we need make buffer size big enough, avoid pi
 
 INLAY_HINT_REQUEST_ID_DICT = {}
 
+# Workspace-level diagnostics storage:
+# { project_path: { filepath: { server_name: [diagnostics...] } } }
+WORKSPACE_DIAGNOSTICS: Dict[str, Dict[str, Dict[str, list]]] = {}
+
+def _workspace_diag_project(project_path: str) -> Dict[str, Dict[str, list]]:
+    return WORKSPACE_DIAGNOSTICS.setdefault(project_path, {})
+
+def record_workspace_diagnostics(project_path: str, filepath: str, diagnostics: list, server_name: str):
+    proj = _workspace_diag_project(project_path)
+    file_entry = proj.setdefault(filepath, {})
+    # Keep latest diagnostics per server
+    file_entry[server_name] = diagnostics or []
+
+def clear_workspace_diagnostics_for_file(project_path: str, filepath: str):
+    proj = _workspace_diag_project(project_path)
+    if filepath in proj:
+        proj.pop(filepath, None)
+
 class MultiFileHandler(FileSystemEventHandler):
     def __init__(self, lsp_server):
         self.lsp_server = lsp_server
         self.file_path_dict = {}
         self.dir_path_dict = {}
 
-    def add_file(self, file_path):
-        self._add_to_dict(self.file_path_dict, file_path)
+    def add_file(self, file_path, recursive=False):
+        # Record whether this pattern should be matched recursively under its base directory.
+        self._add_to_dict(self.file_path_dict, file_path, bool(recursive))
 
-    def add_dir(self, dir_path):
-        self._add_to_dict(self.dir_path_dict, dir_path)
+    def add_dir(self, dir_path, recursive=False):
+        self._add_to_dict(self.dir_path_dict, dir_path, recursive)
 
-    def _add_to_dict(self, dictionary, path):
-        dictionary[os.path.abspath(path)] = path
+    def _add_to_dict(self, dictionary, path, value=None):
+        dictionary[os.path.abspath(path)] = path if value is None else value
 
     def on_created(self, event):
         self._handle_event(event, 1)
@@ -73,8 +94,27 @@ class MultiFileHandler(FileSystemEventHandler):
         self._handle_event(event, 3)
 
     def _handle_event(self, event, change_type):
-        if not event.is_directory and event.src_path in self.file_path_dict:
-            self.lsp_server.send_workspace_did_change_watched_files(event.src_path, change_type)
+        if event.is_directory:
+            return
+
+        src = os.path.abspath(event.src_path)
+
+        # Match exact files and glob patterns (e.g. /base/*.mod)
+        for pattern, recursive in self.file_path_dict.items():
+            if recursive:
+                base_dir = os.path.dirname(pattern)
+                name_pat = os.path.basename(pattern)
+                try:
+                    under_base = os.path.commonpath([src, base_dir]) == os.path.abspath(base_dir)
+                except Exception:
+                    under_base = src.startswith(base_dir)
+                if under_base and fnmatch.fnmatch(os.path.basename(src), name_pat):
+                    self.lsp_server.send_workspace_did_change_watched_files(src, change_type)
+                    break
+            else:
+                if src == pattern or fnmatch.fnmatch(src, pattern):
+                    self.lsp_server.send_workspace_did_change_watched_files(src, change_type)
+                    break
 
 class LspServerSender(MessageSender):
     def __init__(self, process: subprocess.Popen, server_name, project_name):
@@ -750,8 +790,18 @@ class LspServer:
     def handle_publish_diagnostics(self, message):
         if "method" in message and message["method"] == "textDocument/publishDiagnostics":
             filepath = uri_to_path(message["params"]["uri"])
-            if self.enable_diagnostics and is_in_path_dict(self.files, filepath):
-                get_from_path_dict(self.files, filepath).record_diagnostics(message["params"]["diagnostics"], self.server_info["name"])
+            if not self.enable_diagnostics:
+                return
+
+            diagnostics = message["params"].get("diagnostics", [])
+
+            if is_in_path_dict(self.files, filepath):
+                get_from_path_dict(self.files, filepath).record_diagnostics(diagnostics, self.server_info["name"])
+                # Also clear any workspace-level cache for this file to avoid duplication
+                clear_workspace_diagnostics_for_file(self.project_path, filepath)
+            else:
+                # File not opened in Emacs; keep diagnostics in workspace cache
+                record_workspace_diagnostics(self.project_path, filepath, diagnostics, self.server_info["name"])
 
     def handle_dart_publish_closing_labels(self, message):
         if "method" in message and message["method"] == "dart/textDocument/publishClosingLabels":
@@ -937,39 +987,56 @@ class LspServer:
             self.workspace_file_watcher = None
             self.workspace_file_watch_handler = None
 
-    def monitor_workspace_files(self, file_paths):
-        if len(file_paths) > 0:
+    def monitor_workspace_files(self, watches):
+        if len(watches) > 0:
             # Init workspace watch files vars.
             self.start_workspace_watch_files()
 
-            # Add workspace file in monitor list.
-            for file_path in file_paths:
-                # Add file path in notify list.
-                self.workspace_file_watch_handler.add_file(file_path)
+            # Add workspace patterns in monitor list and compute per-dir recursion.
+            dir_recursive = {}
+            for w in watches:
+                file_pattern = w if isinstance(w, str) else w.get('pattern', '')
+                recursive = False if isinstance(w, str) else bool(w.get('recursive', False))
 
-                # Only monitor directory once.
-                target_dir = os.path.dirname(file_path)
+                if not file_pattern:
+                    continue
+
+                # Add file pattern to notify list (carry recursive flag for matching semantics).
+                self.workspace_file_watch_handler.add_file(file_pattern, recursive)
+
+                # Accumulate recursion requirement per directory.
+                target_dir = os.path.dirname(file_pattern)
+                if target_dir:
+                    dir_recursive[target_dir] = dir_recursive.get(target_dir, False) or recursive
+
+            # Schedule directories, honoring recursion if any pattern requires it.
+            for target_dir, recursive in dir_recursive.items():
                 if target_dir not in self.workspace_file_watch_handler.dir_path_dict:
-                    self.workspace_file_watcher.schedule(self.workspace_file_watch_handler, target_dir, recursive=False)
-                    self.workspace_file_watch_handler.add_dir(target_dir)
+                    self.workspace_file_watcher.schedule(self.workspace_file_watch_handler, target_dir, recursive=recursive)
+                    self.workspace_file_watch_handler.add_dir(target_dir, recursive)
 
     def parse_workspace_watch_files(self, params):
-        patterns = []
+        watches = []
         for registration in params['registrations']:
             if registration.get('method') == 'workspace/didChangeWatchedFiles':
                 watchers = registration.get('registerOptions', {}).get('watchers', [])
                 for watcher in watchers:
                     glob_pattern = watcher.get('globPattern', {})
                     if isinstance(glob_pattern, str):
+                        # Keep simple string patterns; record recursion if contains '**'
                         if not glob_pattern.startswith('**/**.'):
-                            patterns.append(glob_pattern)
+                            watches.append({
+                                'pattern': glob_pattern,
+                                'recursive': ('**' in glob_pattern)
+                            })
                     elif isinstance(glob_pattern, dict):
                         base_uri = glob_pattern.get('baseUri', '')
                         pattern = glob_pattern.get('pattern', '')
+                        recursive_flag = ('**' in pattern)
 
                         # Filter **/*.ext rule.
-                        if pattern.startswith('**/*.'):
-                            continue
+                        # if pattern.startswith('**/*.'):
+                        #     continue
 
                         if base_uri.startswith('file://'):
                             base_uri = base_uri[7:]
@@ -982,21 +1049,30 @@ class LspServer:
 
                         # Handle {a,b} syntax
                         if '{' in full_pattern and '}' in full_pattern:
-                            prefix, suffix = full_pattern.split('{')
+                            prefix, suffix = full_pattern.split('{', 1)
                             suffix = suffix.split('}')
                             options = suffix[0].split(',')
                             for option in options:
-                                patterns.append(prefix + option + suffix[1])
+                                watches.append({
+                                    'pattern': prefix + option + suffix[1],
+                                    'recursive': recursive_flag
+                                })
                         else:
-                            patterns.append(full_pattern)
+                            watches.append({
+                                'pattern': full_pattern,
+                                'recursive': recursive_flag
+                            })
 
-        # Remove duplicate file.
-        paths = list(set(patterns))
+        # Remove duplicates by (pattern, recursive) tuple.
+        dedup = {}
+        for w in watches:
+            key = (w['pattern'], bool(w.get('recursive', False)))
+            dedup[key] = w
 
-        # Filter path that it's parent directory is not exist.
-        files = list(filter(lambda path: os.path.exists(os.path.dirname(path)), paths))
+        # Filter pattern whose parent directory is not exist.
+        result = [w for w in dedup.values() if os.path.exists(os.path.dirname(w['pattern']))]
 
-        return files
+        return result
 
     def close_file(self, filepath):
         # Send didClose notification when client close file.

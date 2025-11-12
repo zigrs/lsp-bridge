@@ -155,7 +155,7 @@ class LspBridge:
         for name in ["change_file", "update_file",  "save_file",
                      "try_completion", "try_formatting",
                      "change_cursor",
-                     "list_diagnostics",
+                     "list_diagnostics", "workspace_list_diagnostics",
                      "try_code_action",
                      "workspace_symbol"] + handler_subclasses:
             self.build_file_action_function(name)

@@ -346,8 +346,11 @@ You can set this value with `(2 3 4) if you just need render error diagnostic."
 
 (defun lsp-bridge-workspace-diagnostic-list ()
   (interactive)
-  ;; (lsp-bridge-call-file-api "workspace_diagnostics")
-  (message "Workspace diagnostic just few LSP server implement it, lsp-bridge haven't support it."))
+  ;; Request fresh workspace diagnostics (LSP 3.17 pull-based), then list after idle delay.
+  (lsp-bridge-call-file-api "workspace_diagnostics")
+  (run-at-time lsp-bridge-diagnostic-fetch-idle nil
+               (lambda ()
+                 (lsp-bridge-call-file-api "workspace_list_diagnostics" lsp-bridge-diagnostic-hide-severities))))
 
 (defun lsp-bridge-diagnostic-list ()
   (interactive)
@@ -392,7 +395,43 @@ You can set this value with `(2 3 4) if you just need render error diagnostic."
                                   "\033[0m"
                                   (substring line-content content-end-column))))
 
-          (setq diagnostic-counter (1+ diagnostic-counter))))
+      (setq diagnostic-counter (1+ diagnostic-counter))))
+      (lsp-bridge-ref-popup (buffer-string) diagnostic-counter))))
+
+(defun lsp-bridge-workspace-diagnostic--list (diagnostics)
+  "Render workspace diagnostics list in a popup buffer using lsp-bridge-ref UI."
+  (let ((diagnostic-counter 0)
+        (grouped (make-hash-table :test 'equal)))
+    ;; Group diagnostics by filepath
+    (dolist (d diagnostics)
+      (let ((fp (plist-get d :filepath)))
+        (push d (gethash fp grouped nil))
+        (puthash fp (gethash fp grouped) grouped)))
+
+    (with-temp-buffer
+      (maphash
+       (lambda (fp diags)
+         (insert (concat "\n" "\033[95m" fp "\033[0m" "\n"))
+         (dolist (diagnostic (nreverse diags))
+           (let* ((range (plist-get diagnostic :range))
+                  (message (plist-get diagnostic :message))
+                  (start (plist-get range :start))
+                  (end (plist-get range :end))
+                  (start-line (1+ (plist-get start :line)))
+                  (start-column (plist-get start :character))
+                  (end-line (1+ (plist-get end :line)))
+                  (end-column (plist-get end :character)))
+             (insert (concat "\033[93m" (format "%s %s" (1+ diagnostic-counter) message) "\033[0m" "\n"))
+             ;; `start' point and `end' point will same if the diagnostic message is for a location rather than region.
+             (when (equal start-column end-column)
+               (setq end-column (1+ end-column)))
+             ;; We don't include line content for unopened files; keep simple position stub for jump.
+             (insert (format "%s:%s:%s\n\n"
+                             start-line
+                             start-column
+                             ""))
+             (setq diagnostic-counter (1+ diagnostic-counter)))))
+       grouped)
       (lsp-bridge-ref-popup (buffer-string) diagnostic-counter))))
 
 (provide 'lsp-bridge-diagnostic)
