@@ -11,6 +11,7 @@ class Diagnostic(Handler):
     method = "textDocument/diagnostic"
     provider = "diagnostic_provider"
     provider_message = "LSP server doesn't support pull-based diagnostics"
+    cancel_on_change = True
 
     def process_request(self, identifier: Optional[str] = None, previous_result_id: Optional[str] = None) -> dict:
         params = {}
@@ -24,6 +25,10 @@ class Diagnostic(Handler):
         if not response or "items" not in response:
             return
 
-        diagnostics = response.get("items")
+        diagnostics = response.get("items", [])
 
-        self.file_action.record_diagnostics(diagnostics, self.server_info["name"])
+        self.file_action.record_diagnostics(
+            diagnostics,
+            self.server_info["name"],
+            max(0, self.file_action.version - 1),
+        )

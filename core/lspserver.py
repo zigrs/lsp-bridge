@@ -793,10 +793,13 @@ class LspServer:
             if not self.enable_diagnostics:
                 return
 
+            diagnostic_version = message["params"].get("version", None)
             diagnostics = message["params"].get("diagnostics", [])
 
             if is_in_path_dict(self.files, filepath):
-                get_from_path_dict(self.files, filepath).record_diagnostics(diagnostics, self.server_info["name"])
+                get_from_path_dict(self.files, filepath).record_diagnostics(
+                    diagnostics, self.server_info["name"], diagnostic_version
+                )
                 # Also clear any workspace-level cache for this file to avoid duplication
                 clear_workspace_diagnostics_for_file(self.project_path, filepath)
             else:

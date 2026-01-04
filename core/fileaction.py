@@ -63,6 +63,7 @@ class FileAction:
 
         self.diagnostics = {}
         self.diagnostics_ticker = {}
+        self.diagnostics_versions = {}
 
         self.external_file_link = external_file_link
         self.filepath = filepath
@@ -414,8 +415,28 @@ class FileAction:
         else:
             return 0
 
-    def record_diagnostics(self, diagnostics, server_name):
+    def record_diagnostics(self, diagnostics, server_name, version=None):
         log_time("Record diagnostics from '{}' for file {}".format(server_name, os.path.basename(self.filepath)))
+
+        diagnostic_version = None
+        if version is not None:
+            try:
+                diagnostic_version = int(version)
+            except Exception:
+                diagnostic_version = None
+
+        if diagnostic_version is not None:
+            last_version = self.diagnostics_versions.get(server_name)
+            if last_version is not None and diagnostic_version < last_version:
+                logger.debug(
+                    "Drop outdated diagnostics from '%s' for %s: version=%s < last=%s",
+                    server_name,
+                    os.path.basename(self.filepath),
+                    diagnostic_version,
+                    last_version,
+                )
+                return
+            self.diagnostics_versions[server_name] = diagnostic_version
 
         # Record diagnostics data that push from LSP server.
         import functools
