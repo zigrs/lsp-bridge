@@ -263,12 +263,12 @@ lsp-bridge provides support for more than two language servers for many language
 
 - `lsp-bridge-c-lsp-server`: C language server, you can choose `clangd` or`ccls`
 - `lsp-bridge-elixir-lsp-server`: Elixir language server, you can choose `elixirLS`(default), `lexical` or `nextls`
-- `lsp-bridge-python-lsp-server`: Python language server, you can choose `basedpyright`, `pyright`, `jedi`, `python-ms`, `pylsp`, `ruff`, it's important to note that lsp-bridge-multi-lang-server-mode-list has a higher priority than lsp-bridge-single-lang-server-mode-list. If you only want to use a single server, please first remove the python-mode setting from lsp-bridge-multi-lang-server-mode-list.
+- `lsp-bridge-python-lsp-server`: Python language server, you can choose `basedpyright`, `pyright`, `jedi`, `python-ms`, `pylsp`, `ruff`, `ty`, it's important to note that lsp-bridge-multi-lang-server-mode-list has a higher priority than lsp-bridge-single-lang-server-mode-list. If you only want to use a single server, please first remove the python-mode setting from lsp-bridge-multi-lang-server-mode-list.
 - `lsp-bridge-ruby-lsp-server`: Ruby language server, you can choose `solargraph`, `ruby-lsp`
 - `lsp-bridge-php-lsp-server`: PHP language server, you can choose `intelephense` or `phpactor`
 - `lsp-bridge-tex-lsp-server`: LaTeX language server, you can choose `texlab`, `digestif` or `ltex-ls`
 - `lsp-bridge-csharp-lsp-server`: C# language server, you can choose `omnisharp-mono`, `omnisharp-dotnet` or `csharp-ls`, note that you need to give **execute permissions** to the OmniSharp file
-- `lsp-bridge-python-multi-lsp-server`: Python multi-language servers, you can choose `basedpyright_ruff`, `pyright_ruff`, `jedi_ruff`, `python-ms_ruff`, `pylsp_ruff`
+- `lsp-bridge-python-multi-lsp-server`: Python multi-language servers, you can choose `basedpyright_ruff`, `pyright_ruff`, `jedi_ruff`, `python-ms_ruff`, `pylsp_ruff`, `ty_ruff`
 - `lsp-bridge-nix-lsp-server`: Nix language server, you can choose `rnix-lsp`, `nixd` or `nil`
 - `lsp-bridge-markdown-lsp-server`: Markdown language server, you can choose `vale-ls` or `marksman`
 - `lsp-bridge-lua-lsp-server`: Lua language server, you can choose `sumneko` or `lua-lsp`
@@ -297,6 +297,7 @@ lsp-bridge provides support for more than two language servers for many language
 - `lsp-bridge-enable-search-words`: index the word of the file, enable by default
 - `lsp-bridge-enable-auto-format-code`: automatic format code, disable by default
 - `lsp-bridge-enable-signature-help`: show function parameter in minibufer, enable by default
+- `lsp-bridge-enable-document-highlight`: highlight identical symbols in the document, disable by default
 - `lsp-bridge-log-level`: set LSP message level. see the `descript-variable lsp-bridge-log-level` for more detail, usually do no set it `debug` to avoid affecting performance
 - `lsp-bridge-enable-debug`: enable program debugging, disable by default
 - `lsp-bridge-disable-backup`: forbidden version manage of emacs, enable by default
@@ -350,7 +351,8 @@ lsp-bridge provides support for more than two language servers for many language
 - `acm-backend-yas-candidates-number`: yasnippet display number， 2 by default
 - `acm-backend-citre-keyword-complete`: Completion is performed according to the keywords of each mode defined by `acm-backend-citre-keywords-alist`, which takes effect only after citre is enabled.
 - `acm-backend-search-sdcv-words-dictionary`: StarDict dictionary for word completion, default is `kdic-ec-11w`, you can replace it with StarDict dictionary path, example, if you have dictionary `/usr/share/stardict/dic/stardict-oxford-gb-formated-2.4.2/oxford-gb-formated.ifo`, you need set this value to `/usr/share/stardict/dic/stardict-oxford-gb-formated-2.4.2/oxford-gb-formated`, not include `.ifo` extension.
-- `acm-backend-lsp-match-mode`: The filtering mode for candidates in LSP backend, there are three options: "prefix", "prefixCaseSensitive", and "fuzzy". By default it is "fuzzy"
+- `acm-backend-lsp-match-mode`: The filtering mode for candidates in LSP backend, there are six options: "prefix", "prefixCaseSensitive", "substring" and "fuzzy". By default it is "fuzzy"
+- `acm-backend-lsp-case-mode`: The case sensitive mode for filtering candidates in LSP backend, there are three options: "ignore", "sensitive" and "smart". By default it is "ignore"
 - `acm-backend-lsp-frontend-filter-p`: Since LSP candidates have been filtered in the Python backend, it's not necessary to perform an additional filter on the frontend (refer to option `acm-candidate-match-function`), disable by default, when set to `t`, this option will call the `acm-candidate-match-function` function on the frontend to filter LSP candidates again
 - `acm-backend-lsp-show-progress`: show working progress, disable by default
 - `acm-enable-preview`: enable Tab-and-Go completion, commands like acm-select-* will select and preview other candidate and further input will then commit this candidate, disable by default
@@ -446,6 +448,7 @@ If your language supports mixed multi-language servers, it is recommended to che
 |             | [basedpyright](https://detachhead.github.io/basedpyright)                                                    | `pip install basedpyright`, `lsp-bridge-python-lsp-server` set to `basedpyright`                                                                                                                   |
 |             | [pyright](https://github.com/microsoft/pyright)                                                    | `lsp-bridge-python-lsp-server` set to `pyright`, `pyright-background-analysis` is faster sometimes, but it can’t response diagnostic informations                                                                                                                   |
 |             | [python-ms](https://github.com/microsoft/python-language-server)                                   | Legacy language server for Python2                                                                                                                                                                                                                                  |
+|             | [ty](https://github.com/astral-sh/ty)                                   | An extremely fast Python type checker and language server                                                                                                                                                                                                                                  |
 |             | [ruff](https://github.com/astral-sh/ruff)                                                          | `pip install ruff`, `lsp-bridge-python-lsp-server` is set to `ruff`, which only has the function of linter. If you need to complete the functions, install other Python language servers, and set the `lsp-bridge-python-multi-lsp-server` to `[LSP NAME]_ruff` |
 | QML         | [qmlls](https://github.com/qt/qtdeclarative/tree/dev/tools/qmlls)                                  | The `qmlls` binary should be part of the normal Qt packages since Qt 6.3.0 Ensure that the directory of `qmlls` binary file is in PATH                                                                                                                              |
 | Puppet           | [puppet-languageserver](https://github.com/puppetlabs/puppet-editor-services)                                |                                                                                                                                                                                                                               |

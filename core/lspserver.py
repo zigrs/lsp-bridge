@@ -324,6 +324,7 @@ class LspServer:
         self.code_action_provider = False
         self.code_format_provider = False
         self.range_format_provider = False
+        self.document_highlight_provider = False
         self.signature_help_provider = False
         self.workspace_symbol_provider = False
         self.inlay_hint_provider = False
@@ -750,6 +751,7 @@ class LspServer:
             "Unhandled method textDocument/codeAction": "code_action_provider",
             "Unhandled method textDocument/formatting": "code_format_provider",
             "Unhandled method textDocument/rangeFormatting": "range_format_provider",
+            "Unhandled method textDocument/documentHighlight": "document_highlight_provider",
             "Unhandled method textDocument/signatureHelp": "signature_help_provider",
             "Unhandled method workspace/symbol": "workspace_symbol_provider",
             "Unhandled method textDocument/inlayHint": "inlay_hint_provider",
@@ -833,6 +835,7 @@ class LspServer:
             ("rename_prepare_provider", ["result", "capabilities", "renameProvider", "prepareProvider"]),
             ("code_action_provider", ["result", "capabilities", "codeActionProvider"]),
             ("code_action_kinds", ["result", "capabilities", "codeActionProvider", "codeActionKinds"]),
+            ("document_highlight_provider", ["result", "capabilities", "documentHighlightProvider"]),            
             ("code_format_provider", ["result", "capabilities", "documentFormattingProvider"]),
             ("range_format_provider", ["result", "capabilities", "documentRangeFormattingProvider"]),
             ("signature_help_provider", ["result", "capabilities", "signatureHelpProvider"]),
@@ -963,6 +966,8 @@ class LspServer:
             return
 
         self.record_message(message)
+        if self.handle_tsserver_request(message):
+            return
         self.handle_diagnostics_message(message)
         self.handle_log_message(message)
         self.handle_id_message(message)
@@ -1103,3 +1108,13 @@ class LspServer:
                 os.kill(self.lsp_subprocess.pid, 9)
             except ProcessLookupError:
                 log_time("LSP server {} ({}) already exited!".format(self.server_info["name"], self.lsp_subprocess.pid))
+
+    def handle_tsserver_request(self, message):
+            # Volar hybrid mode: forward tsserver requests to external TS LSP server.
+            # See: https://github.com/vuejs/language-tools/wiki/Neovim
+            if (self.server_info.get("name") == "volar" and
+                    "method" in message and message["method"] == "tsserver/request"):
+                from core.handler.volar_proxy import VolarProxy
+                VolarProxy.handle_tsserver_request(self, message.get("params"))
+                return True
+            return False
