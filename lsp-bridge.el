@@ -491,6 +491,14 @@ which refer to https://docs.python.org/3/library/logging.html#levels for more de
           (const :tag "error level" error)
           (const :tag "critical level" critical)))
 
+(defcustom lsp-bridge-enable-workspace-file-watch t
+  "Whether lsp-bridge should honor LSP `workspace/didChangeWatchedFiles` registrations.
+
+Disabling this avoids native file watcher traffic entirely, which can help
+when large projects or noisy build tools cause event storms."
+  :type 'boolean
+  :group 'lsp-bridge)
+
 (defcustom lsp-bridge-enable-profile nil
   "Enable this option to output performance data to ~/lsp-bridge.prof."
   :type 'boolean)

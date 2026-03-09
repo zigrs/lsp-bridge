@@ -1,6 +1,5 @@
 from core.handler import Handler
 from core.utils import *
-from core.lspserver import record_workspace_diagnostics
 
 class WorkspaceDiagnostics(Handler):
     name = "workspace_diagnostics"
@@ -16,6 +15,8 @@ class WorkspaceDiagnostics(Handler):
         # LSP 3.17: WorkspaceDiagnosticReport has 'items': [{uri, version? , items? or resultId}]
         if not response:
             return
+        from core.lspserver import record_workspace_diagnostics
+
         items = response.get("items", [])
         server_name = self.server_info["name"] if self.server_info else ""
         project_path = self.file_action.single_server.project_path if self.file_action and self.file_action.single_server else None

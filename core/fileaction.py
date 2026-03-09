@@ -451,6 +451,20 @@ class FileAction:
         import functools
         self.diagnostics[server_name] = sorted(diagnostics, key=functools.cmp_to_key(self.sort_diagnostic))
 
+        project_path = None
+        if self.single_server is not None:
+            project_path = getattr(self.single_server, "project_path", None)
+        elif self.multi_servers:
+            for server in self.multi_servers.values():
+                project_path = getattr(server, "project_path", None)
+                if project_path:
+                    break
+
+        if project_path:
+            proj = WORKSPACE_DIAGNOSTICS.setdefault(project_path, {})
+            file_entry = proj.setdefault(self.filepath, {})
+            file_entry[server_name] = self.diagnostics[server_name]
+
         if server_name in self.diagnostics_ticker:
             self.diagnostics_ticker[server_name] += 1
         else:

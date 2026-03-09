@@ -109,11 +109,11 @@ class MultiFileHandler(FileSystemEventHandler):
                 except Exception:
                     under_base = src.startswith(base_dir)
                 if under_base and fnmatch.fnmatch(os.path.basename(src), name_pat):
-                    self.lsp_server.send_workspace_did_change_watched_files(src, change_type)
+                    self.lsp_server.queue_workspace_did_change_watched_files(src, change_type)
                     break
             else:
                 if src == pattern or fnmatch.fnmatch(src, pattern):
-                    self.lsp_server.send_workspace_did_change_watched_files(src, change_type)
+                    self.lsp_server.queue_workspace_did_change_watched_files(src, change_type)
                     break
 
 class LspServerSender(MessageSender):
@@ -158,6 +158,7 @@ class LspServerSender(MessageSender):
     def send_message(self, message: dict):
         # message_type is not valid key of JSONRPC, we need remove message_type before send LSP server.
         message_type = message.get("message_type")
+        method = message.get("method", "response")
         message.pop("message_type")
 
         # Parse json content.
@@ -172,17 +173,21 @@ class LspServerSender(MessageSender):
         # So we need INLAY_HINT_REQUEST_ID_DICT to contain documentation path to send retry request.
         record_inlay_hint_request(message)
 
-        if message_type == "request" and \
-           not message.get('method', 'response') == 'textDocument/documentSymbol':
+        if method == "workspace/didChangeWatchedFiles":
+            log_time_debug("Send workspace/didChangeWatchedFiles notification to '{}' for project {}".format(
+                self.server_name,
+                self.project_name
+            ))
+        elif message_type == "request" and method != 'textDocument/documentSymbol':
             log_time("Send {} request ({}) to '{}' for project {}".format(
-                message.get('method', 'response'),
+                method,
                 message.get('id', 'notification'),
                 self.server_name,
                 self.project_name
             ))
         elif message_type == "notification":
             log_time("Send {} notification to '{}' for project {}".format(
-                message.get('method', 'response'),
+                method,
                 self.server_name,
                 self.project_name
             ))
@@ -346,6 +351,10 @@ class LspServer:
 
         self.workspace_file_watcher = None
         self.workspace_file_watch_handler = None
+        self.workspace_watch_lock = threading.Lock()
+        self.workspace_watch_timer = None
+        self.workspace_watch_pending = {}
+        self.workspace_watch_flush_delay = 0.2
 
         self.code_action_kinds = [
             "quickfix",
@@ -408,11 +417,8 @@ class LspServer:
             logger.error(traceback.format_exc())
 
     def send_initialize_request(self):
-        initialize_options = self.server_info.get("initializationOptions", {})
-
         self.worksplace_folder = get_emacs_func_result("get-workspace-folder", self.project_path)
-
-        self.sender.send_request("initialize", {
+        initialize_params = {
             "processId": os.getpid(),
             "rootPath": self.root_path,
             "clientInfo": {
@@ -421,8 +427,13 @@ class LspServer:
             },
             "rootUri": path_to_uri(self.project_path),
             "capabilities": self.get_capabilities(),
-            "initializationOptions": initialize_options
-        }, self.initialize_id, init=True)
+            "initializationOptions": self.get_initialization_options()
+        }
+        workspace_folders = self.get_workspace_folders()
+        if workspace_folders is not None:
+            initialize_params["workspaceFolders"] = workspace_folders
+
+        self.sender.send_request("initialize", initialize_params, self.initialize_id, init=True)
 
     def get_capabilities(self):
         server_capabilities = self.server_info.get("capabilities", {})
@@ -535,16 +546,17 @@ class LspServer:
         return merge_capabilites
 
     def get_initialization_options(self):
-        initialization_options = self.server_info.get("initializationOptions", {})
+        return self.server_info.get("initializationOptions", {})
 
-        if isinstance(self.worksplace_folder, str):
-            initialization_options = merge(initialization_options, {
-                "workspaceFolders": [
-                    self.worksplace_folder
-                ]
-            })
+    def get_workspace_folders(self):
+        if not isinstance(self.worksplace_folder, str):
+            return None
 
-        return initialization_options
+        workspace_path = os.path.normpath(self.worksplace_folder)
+        return [{
+            "name": os.path.basename(workspace_path),
+            "uri": path_to_uri(workspace_path)
+        }]
 
     def parse_document_uri(self, filepath, external_file_link):
         """If FileAction include external_file_link return by LSP server, such as jdt.
@@ -603,7 +615,7 @@ class LspServer:
         })
 
     def send_did_rename_files_notification(self, old_filepath, new_filepath):
-        self.sender.send_notification("workspace/renameFiles", {
+        self.sender.send_notification("workspace/didRenameFiles", {
             "files": [{
                 "oldUri": path_to_uri(old_filepath),
                 "newUri": path_to_uri(new_filepath)
@@ -620,20 +632,38 @@ class LspServer:
 
             # Fetch buffer whole content to LSP server if server capability 'includeText' is True.
             if self.save_include_text:
-                args = merge(args, {
-                    "textDocument": {
-                        "text": get_buffer_content(filepath, buffer_name)
-                    }
-                })
+                args["text"] = get_buffer_content(filepath, buffer_name)
 
             self.sender.send_notification("textDocument/didSave", args)
 
-    def send_workspace_did_change_watched_files(self, filepath, change_type):
+    def queue_workspace_did_change_watched_files(self, filepath, change_type):
+        with self.workspace_watch_lock:
+            self.workspace_watch_pending[filepath] = change_type
+            if self.workspace_watch_timer is None or not self.workspace_watch_timer.is_alive():
+                self.workspace_watch_timer = threading.Timer(
+                    self.workspace_watch_flush_delay,
+                    self.flush_workspace_did_change_watched_files,
+                )
+                self.workspace_watch_timer.start()
+
+    def flush_workspace_did_change_watched_files(self):
+        with self.workspace_watch_lock:
+            if not self.workspace_watch_pending:
+                self.workspace_watch_timer = None
+                return
+
+            changes = [
+                {
+                    "uri": path_to_uri(filepath),
+                    "type": change_type,
+                }
+                for filepath, change_type in self.workspace_watch_pending.items()
+            ]
+            self.workspace_watch_pending.clear()
+            self.workspace_watch_timer = None
+
         self.sender.send_notification("workspace/didChangeWatchedFiles", {
-            "changes": [{
-                "uri": path_to_uri(filepath),
-                "type": change_type
-            }]
+            "changes": changes
         })
 
     def send_did_change_notification(self, filepath, version, start, end, range_length, text):
@@ -802,8 +832,6 @@ class LspServer:
                 get_from_path_dict(self.files, filepath).record_diagnostics(
                     diagnostics, self.server_info["name"], diagnostic_version
                 )
-                # Also clear any workspace-level cache for this file to avoid duplication
-                clear_workspace_diagnostics_for_file(self.project_path, filepath)
             else:
                 # File not opened in Emacs; keep diagnostics in workspace cache
                 record_workspace_diagnostics(self.project_path, filepath, diagnostics, self.server_info["name"])
@@ -946,16 +974,30 @@ class LspServer:
     def handle_register_capability_message(self, message):
         if "method" in message and message["method"] in ["client/registerCapability"]:
             try:
+                [enable_workspace_file_watch] = get_emacs_vars(["lsp-bridge-enable-workspace-file-watch"])
                 for registration in message["params"]["registrations"]:
                     if registration["method"] == "workspace/didChangeWatchedFiles":
-                        workspace_watch_files = self.parse_workspace_watch_files(message["params"])
-                        self.monitor_workspace_files(workspace_watch_files)
-                        log_time("Add workspace watch files: {}".format(workspace_watch_files))
+                        if enable_workspace_file_watch:
+                            workspace_watch_files = self.parse_workspace_watch_files(message["params"])
+                            self.monitor_workspace_files(workspace_watch_files)
+                            log_time("Add workspace watch files: {}".format(workspace_watch_files))
                     elif registration["method"] == "textDocument/formatting":
                         self.code_format_provider = True
                     elif registration["method"] == "textDocument/rangeFormatting":
                         self.range_format_provider = True
             except:
+                log_time(traceback.format_exc())
+
+            self.sender.send_response(message["id"], None)
+
+    def handle_unregister_capability_message(self, message):
+        if "method" in message and message["method"] == "client/unregisterCapability":
+            try:
+                for unregister in message["params"].get("unregisterations", []) + message["params"].get("unregistrations", []):
+                    if unregister.get("method") == "workspace/didChangeWatchedFiles":
+                        self.stop_workspace_watch_files()
+                        break
+            except Exception:
                 log_time(traceback.format_exc())
 
             self.sender.send_response(message["id"], None)
@@ -973,6 +1015,7 @@ class LspServer:
         self.handle_id_message(message)
         self.handle_work_done_progress_message(message)
         self.handle_register_capability_message(message)
+        self.handle_unregister_capability_message(message)
 
         logger.debug(json.dumps(message, indent=3))
 
@@ -989,8 +1032,19 @@ class LspServer:
 
     def stop_workspace_watch_files(self):
         if self.workspace_file_watcher:
+            with self.workspace_watch_lock:
+                if self.workspace_watch_timer and self.workspace_watch_timer.is_alive():
+                    self.workspace_watch_timer.cancel()
+                self.workspace_watch_timer = None
+                self.workspace_watch_pending.clear()
+
             self.workspace_file_watcher.unschedule_all()
             self.workspace_file_watcher.stop()
+            self.workspace_file_watcher.join(timeout=1)
+
+            if self.workspace_file_watch_handler:
+                self.workspace_file_watch_handler.file_path_dict.clear()
+                self.workspace_file_watch_handler.dir_path_dict.clear()
 
             self.workspace_file_watcher = None
             self.workspace_file_watch_handler = None
@@ -1031,45 +1085,18 @@ class LspServer:
                 for watcher in watchers:
                     glob_pattern = watcher.get('globPattern', {})
                     if isinstance(glob_pattern, str):
-                        # Keep simple string patterns; record recursion if contains '**'
-                        if not glob_pattern.startswith('**/**.'):
-                            watches.append({
-                                'pattern': glob_pattern,
-                                'recursive': ('**' in glob_pattern)
-                            })
+                        for pattern in self._expand_workspace_watch_patterns(
+                                self.project_path, glob_pattern):
+                            watches.append(pattern)
                     elif isinstance(glob_pattern, dict):
                         base_uri = glob_pattern.get('baseUri', '')
                         pattern = glob_pattern.get('pattern', '')
-                        recursive_flag = ('**' in pattern)
+                        base_path = self.project_path
+                        if isinstance(base_uri, str) and base_uri.startswith('file://'):
+                            base_path = uri_to_path(base_uri)
 
-                        # Filter **/*.ext rule.
-                        # if pattern.startswith('**/*.'):
-                        #     continue
-
-                        if base_uri.startswith('file://'):
-                            base_uri = base_uri[7:]
-
-                        # Replace ** with base_uri
-                        if pattern.startswith('**'):
-                            full_pattern = os.path.join(base_uri, pattern[2:].lstrip('/'))
-                        else:
-                            full_pattern = os.path.join(base_uri, pattern)
-
-                        # Handle {a,b} syntax
-                        if '{' in full_pattern and '}' in full_pattern:
-                            prefix, suffix = full_pattern.split('{', 1)
-                            suffix = suffix.split('}')
-                            options = suffix[0].split(',')
-                            for option in options:
-                                watches.append({
-                                    'pattern': prefix + option + suffix[1],
-                                    'recursive': recursive_flag
-                                })
-                        else:
-                            watches.append({
-                                'pattern': full_pattern,
-                                'recursive': recursive_flag
-                            })
+                        for full_pattern in self._expand_brace_pattern(pattern):
+                            watches.append(self._build_workspace_watch_entry(base_path, full_pattern))
 
         # Remove duplicates by (pattern, recursive) tuple.
         dedup = {}
@@ -1078,9 +1105,43 @@ class LspServer:
             dedup[key] = w
 
         # Filter pattern whose parent directory is not exist.
-        result = [w for w in dedup.values() if os.path.exists(os.path.dirname(w['pattern']))]
+        result = [w for w in dedup.values() if os.path.isdir(os.path.dirname(w['pattern']))]
 
         return result
+
+    def _expand_brace_pattern(self, pattern):
+        if '{' not in pattern or '}' not in pattern:
+            return [pattern]
+
+        prefix, suffix = pattern.split('{', 1)
+        options, tail = suffix.split('}', 1)
+        return [prefix + option + tail for option in options.split(',')]
+
+    def _build_workspace_watch_entry(self, base_path, pattern):
+        recursive = '**' in pattern
+        normalized_pattern = pattern.replace("\\", os.sep)
+
+        if os.path.isabs(normalized_pattern):
+            base_pattern = normalized_pattern
+        else:
+            root = base_path or self.project_path
+            if recursive and '**' in normalized_pattern:
+                prefix, _, tail = normalized_pattern.partition('**')
+                tail_basename = os.path.basename(tail) or '*'
+                base_pattern = os.path.join(root, prefix.lstrip('/'), tail_basename)
+            else:
+                base_pattern = os.path.join(root, normalized_pattern)
+
+        return {
+            'pattern': os.path.normpath(base_pattern),
+            'recursive': recursive
+        }
+
+    def _expand_workspace_watch_patterns(self, base_path, pattern):
+        return [
+            self._build_workspace_watch_entry(base_path, expanded_pattern)
+            for expanded_pattern in self._expand_brace_pattern(pattern)
+        ]
 
     def close_file(self, filepath):
         # Send didClose notification when client close file.
