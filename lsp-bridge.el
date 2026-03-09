@@ -110,6 +110,38 @@
 
 (defvar lsp-bridge-tramp-connection-info nil)
 
+(defvar lsp-bridge--remote-ip-to-host nil
+  "Alist mapping remote server IPs to hostnames.
+Populated lazily when the remote server sends an IP (via
+`get_lsp_file_host') that doesn't appear in
+`lsp-bridge-tramp-alias-alist'.")
+
+(defun lsp-bridge--resolve-remote-host (host)
+  "Translate HOST to a known hostname if it is an unrecognized IP.
+Returns HOST unchanged when it is already a known key in
+`lsp-bridge-tramp-alias-alist', or the empty string.  Otherwise
+checks a cache and, as a last resort, searches open buffers for a
+remote buffer whose `lsp-bridge-remote-file-host' IS a known key."
+  (cond
+   ((string= host "") host)
+   ;; Already a known hostname.
+   ((assoc host lsp-bridge-tramp-alias-alist) host)
+   ;; Cached IP-to-hostname.
+   ((cdr (assoc host lsp-bridge--remote-ip-to-host)))
+   ;; Unknown IP -- find a remote buffer whose host IS known.
+   (t (let ((resolved
+             (cl-dolist (buf (buffer-list))
+               (with-current-buffer buf
+                 (when (and (boundp 'lsp-bridge-remote-file-host)
+                            lsp-bridge-remote-file-host
+                            (not (string= lsp-bridge-remote-file-host ""))
+                            (assoc lsp-bridge-remote-file-host
+                                   lsp-bridge-tramp-alias-alist))
+                   (cl-return lsp-bridge-remote-file-host))))))
+        (when resolved
+          (push (cons host resolved) lsp-bridge--remote-ip-to-host))
+        (or resolved host)))))
+
 (setq acm-backend-lsp-fetch-completion-item-func 'lsp-bridge-fetch-completion-item-info)
 
 (defun lsp-bridge-fetch-completion-item-info (candidate)
@@ -549,6 +581,15 @@ Possible choices are basedpyright_ruff, pyright_ruff, pyright-background-analysi
   "Default LSP server for cmake, you can choose `cmake-language-server', `neocmakelsp'"
   :type 'string)
 
+(defcustom lsp-bridge-r-lsp-server "rlanguageserver"
+  "Default LSP server for R, you can choose `rlanguageserver' or `air'."
+  :type 'string)
+
+(defcustom lsp-bridge-r-multi-lsp-server "rlanguageserver_air"
+  "Default Multi LSP server for R.
+Possible choices are `rlanguageserver_air'."
+  :type 'string)
+
 (defcustom lsp-bridge-tsdk-path nil
   "Tsserver lib*.d.ts directory path in current system needed by some lsp servers.
 If nil, lsp-bridge would try to detect by default."
@@ -566,7 +607,8 @@ If nil, lsp-bridge would try to detect by default."
 
 (defcustom lsp-bridge-multi-lang-server-mode-list
   '(((python-mode python-ts-mode) . lsp-bridge-python-multi-lsp-server)
-    ((qml-mode qml-ts-mode) . "qmlls_javascript"))
+    ((qml-mode qml-ts-mode) . "qmlls_javascript")
+    (ess-r-mode . lsp-bridge-r-multi-lsp-server))
   "The multi lang server rule for file mode."
   :type 'cons)
 
@@ -616,7 +658,7 @@ If nil, lsp-bridge would try to detect by default."
     ((fortran-mode f90-mode) .                                                   "fortls")
     ((nix-mode nix-ts-mode) .                                                    lsp-bridge-nix-lsp-server)
     (nickel-mode .                                                               "nls")
-    (ess-r-mode .                                                                "rlanguageserver")
+    (ess-r-mode .                                                                lsp-bridge-r-lsp-server)
     ((graphql-mode graphql-ts-mode) .                                            "graphql-lsp")
     (swift-mode .                                                                "swift-sourcekit")
     ((csharp-mode csharp-ts-mode) .                                              lsp-bridge-csharp-lsp-server)
@@ -639,6 +681,8 @@ If nil, lsp-bridge would try to detect by default."
     (ttcn3-mode .                                                                "ntt")
     (v-mode .                                                                    "v-analyzer")
     (cwl-mode .                                                                  "benten")
+    (lean4-mode .                                                                "lean")
+    (lean4-select-mode .                                                         "lean")
     (odin-mode .                                                                 "ols")
     (ballerina-mode .                                                            "ballerina-lang-server")
     (bibtex-mode .                                                               "citation-langserver")
@@ -648,6 +692,7 @@ If nil, lsp-bridge would try to detect by default."
     (nxml-mode .                                                                 lsp-bridge-xml-lsp-server)
     (robot-mode .                                                                "vscode-rf-language-server")
     (vimrc-mode .                                                                "vim-language-server")
+    (wat-mode .                                                                  "wasm-language-tools")
     (terraform-mode .                                                            "terraform-ls")
     (jsonnet-mode .                                                              "jsonnet-language-server")
     (glsl-mode .                                                                 "glsl-language-server")
@@ -795,6 +840,7 @@ If nil, lsp-bridge would try to detect by default."
     futhark-mode-hook
     conf-toml-mode-hook
     fish-mode-hook
+    wat-mode-hook
     )
   "The default mode hook to enable lsp-bridge."
   :type '(repeat variable))
@@ -877,6 +923,7 @@ you can customize `lsp-bridge-get-workspace-folder' to return workspace folder p
     (hlasm-mode                 . lsp-bridge-indent-eight-level) ; HLASM
     (yang-mode                  . lsp-bridge-indent-two-level) ; Yang
     (mint-mode                  . lsp-bridge-indent-two-level) ; Mint
+    (wat-mode                   . lsp-bridge-indent-two-level) ; WebAssembly Text Format
     (purescript-mode            . purescript-indent-offset) ; PureScript
     (futhark-mode               . futhark-indent-level)     ; Futhark
     (sgml-mode                  . sgml-basic-offset)        ; SGML
@@ -973,11 +1020,12 @@ you can customize `lsp-bridge-get-workspace-folder' to return workspace folder p
 (cl-defmacro lsp-bridge--with-file-buffer (filename filehost &rest body)
   "Evaluate BODY in buffer with FILEPATH."
   (declare (indent 1))
-  `(when-let* ((buffer (pcase ,filehost
-                         ("" (lsp-bridge-get-match-buffer-by-filepath ,filename))
-                         (_ (lsp-bridge-get-match-buffer-by-remote-file ,filehost ,filename)))))
-     (with-current-buffer buffer
-       ,@body)))
+  `(let ((resolved-host (lsp-bridge--resolve-remote-host ,filehost)))
+     (when-let* ((buffer (pcase resolved-host
+                           ("" (lsp-bridge-get-match-buffer-by-filepath ,filename))
+                           (_ (lsp-bridge-get-match-buffer-by-remote-file resolved-host ,filename)))))
+       (with-current-buffer buffer
+         ,@body))))
 
 (cl-defmacro lsp-bridge-save-position (&rest body)
   "`save-excursion' not enough for LSP code format.
@@ -2289,8 +2337,9 @@ Then we need call `lsp-bridge--set-mark-ring-in-new-buffer' in new buffer after 
              (not lsp-bridge-enable-with-tramp))
         (lsp-bridge-call-async "open_remote_file" (format "%s:%s" filehost filename) position)
       ;; filehost is not empty or lsp-bridge-enable-with-tramp is t
-      (when (string= filehost "127.0.0.1")
-        (setq filehost lsp-bridge-remote-file-host))
+      ;; Resolve IP-to-hostname for ProxyCommand hosts where the remote
+      ;; server reports client_address IP instead of the SSH hostname.
+      (setq filehost (lsp-bridge--resolve-remote-host filehost))
 
       (let ((match-window (lsp-bridge--with-file-buffer filename filehost (get-buffer-window))))
         ;; select the window to display definition
