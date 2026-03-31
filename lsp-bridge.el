@@ -76,6 +76,7 @@
 (require 'map)
 (require 'seq)
 (require 'subr-x)
+(require 'ansi-color)
 (require 'markdown-mode)
 (require 'diff)
 
@@ -510,7 +511,7 @@ when large projects or noisy build tools cause event storms."
 (defcustom lsp-bridge-multi-lang-server-extension-list
   '(
     (("vue") . "volar_emmet")
-    (("ts")  . "typescript_eslint")
+    (("ts" "mts")  . "typescript_eslint")
     (("tsx") . "typescriptreact_eslint")
     (("component.html") . "angular_template_html")
     (("component.ts") . "angular_template_typescript")
@@ -1343,6 +1344,20 @@ So we build this macro to restore postion after code format."
 
 (defvar lsp-bridge-log-buffer-window nil)
 
+(defun lsp-bridge--process-log-output (process output)
+  "Insert PROCESS OUTPUT into log buffer with ANSI text properties."
+  (let ((buffer (process-buffer process)))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (let ((inhibit-read-only t)
+              (start (marker-position (process-mark process))))
+          (save-excursion
+            (goto-char start)
+            (insert output)
+            (when (or ansi-color-context (string-match-p "\e" output))
+              (ansi-color-apply-on-region start (point)))
+            (set-marker (process-mark process) (point))))))))
+
 (defun lsp-bridge-restart-process ()
   "Stop and restart LSP-Bridge process."
   (interactive)
@@ -1401,6 +1416,9 @@ So we build this macro to restore postion after code format."
               (apply 'start-process
                      lsp-bridge-name lsp-bridge-name
                      lsp-bridge-internal-process-prog lsp-bridge-internal-process-args)))
+      (with-current-buffer (process-buffer lsp-bridge-internal-process)
+        (setq-local ansi-color-context nil))
+      (set-process-filter lsp-bridge-internal-process #'lsp-bridge--process-log-output)
       (set-process-query-on-exit-flag lsp-bridge-internal-process nil))))
 
 (defun lsp-bridge--called-from-wsl-on-windows-p ()
@@ -1438,6 +1456,7 @@ So we build this macro to restore postion after code format."
     (when (get-buffer lsp-bridge-name)
       (kill-buffer lsp-bridge-name))
     (setq lsp-bridge-epc-process nil)
+    (setq lsp-bridge-internal-process nil)
     (message "[LSP-Bridge] Process terminated.")))
 
 (defun lsp-bridge--first-start (lsp-bridge-epc-port)
