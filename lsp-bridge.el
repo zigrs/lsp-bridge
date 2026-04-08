@@ -1568,9 +1568,51 @@ So we build this macro to restore postion after code format."
   ;; other LSP server need use `bounds-of-thing-at-point' of symbol as keyword prefix.
   (setq-local acm-input-bound-style prefix-style))
 
+(defvar-local lsp-bridge-server-status nil
+  "Alist of current LSP server status for the current buffer.")
+
+(defun lsp-bridge-set-server-status (filename filehost server-name status)
+  (lsp-bridge--with-file-buffer filename filehost
+    (let ((entry (assoc server-name lsp-bridge-server-status)))
+      (if entry
+          (setcdr entry status)
+        (push (cons server-name status) lsp-bridge-server-status)))
+    (force-mode-line-update t)))
+
+(defun lsp-bridge-remove-server-status (filename filehost server-name)
+  (lsp-bridge--with-file-buffer filename filehost
+    (setq-local lsp-bridge-server-status
+                (assoc-delete-all server-name lsp-bridge-server-status))
+    (force-mode-line-update t)))
+
 (defun lsp-bridge-set-server-names (filename filehost server-names)
   (lsp-bridge--with-file-buffer filename filehost
                                 (setq-local acm-backend-lsp-server-names server-names)))
+
+(defun lsp-bridge-show-lsp-status ()
+  (interactive)
+  (let* ((server-names (or (and (boundp 'acm-backend-lsp-server-names)
+                                acm-backend-lsp-server-names)
+                           (mapcar #'car lsp-bridge-server-status)))
+         (status-text
+          (cond
+           ((not (lsp-bridge-process-live-p))
+            "python process down")
+           ((and (boundp 'acm-backend-lsp-server-command-exist)
+                 (not acm-backend-lsp-server-command-exist))
+            "language server command missing")
+           ((null server-names)
+            "no active LSP server in current buffer")
+           (t
+            (mapconcat
+             (lambda (server-name)
+               (format "%s=%s"
+                       server-name
+                       (or (cdr (assoc server-name lsp-bridge-server-status))
+                           "idle")))
+             server-names
+             ", ")))))
+    (message "[LSP-Bridge] LSP status: %s" status-text)))
 
 (defun lsp-bridge-completion--record-items (filename
                                             filehost
@@ -2654,6 +2696,8 @@ Default is `bottom-right', you can choose other value: `top-left', `top-right', 
 (defun lsp-bridge--turn-off-lsp-feature (filename filehost)
   (lsp-bridge--with-file-buffer filename filehost
                                 (setq-local acm-backend-lsp-server-command-exist nil)
+                                (setq-local lsp-bridge-server-status nil)
+                                (force-mode-line-update t)
                                 ))
 
 (defcustom lsp-bridge-workspace-symbol-kind-to-face
@@ -3094,6 +3138,10 @@ We need exclude `markdown-code-fontification:*' buffer in `lsp-bridge-monitor-be
   '((t (:inherit font-lock-constant-face :weight bold)))
   "Face for activity in LSP-bridge's mode line.")
 
+(defface lsp-bridge-loading-mode-line
+  '((t (:inherit warning :weight bold)))
+  "Face for initializing state in LSP-bridge's mode line.")
+
 (defface lsp-bridge-kill-mode-line
   '((t (:inherit font-lock-comment-face :weight bold)))
   "Face for kill process in LSP-bridge's mode line.")
@@ -3102,15 +3150,30 @@ We need exclude `markdown-code-fontification:*' buffer in `lsp-bridge-monitor-be
 
 (put 'lsp-bridge--mode-line-format 'risky-local-variable t)
 
+(defun lsp-bridge--mode-line-state ()
+  (cond
+   ((not (lsp-bridge-process-live-p))
+    (cons "down" 'lsp-bridge-kill-mode-line))
+   ((and (boundp 'acm-backend-lsp-server-command-exist)
+         (not acm-backend-lsp-server-command-exist))
+    (cons "error" 'lsp-bridge-kill-mode-line))
+   (lsp-bridge-server-status
+    (let* ((statuses (mapcar #'cdr lsp-bridge-server-status))
+           (total (length statuses))
+           (ready (cl-count "ready" statuses :test #'equal)))
+      (if (= ready total)
+          (cons "ready" 'lsp-bridge-alive-mode-line)
+        (cons (format "%d/%d" ready total) 'lsp-bridge-loading-mode-line))))
+   ((boundp 'acm-backend-lsp-filepath)
+    (cons "idle" 'lsp-bridge-loading-mode-line))
+   (t
+    (cons "boot" 'lsp-bridge-loading-mode-line))))
+
 (defun lsp-bridge--mode-line-format ()
   "Compose the LSP-bridge's mode-line."
-  (setq-local mode-face
-              (if (lsp-bridge-process-live-p)
-                  'lsp-bridge-alive-mode-line
-                'lsp-bridge-kill-mode-line))
-
-  (when lsp-bridge-server
-    (propertize "lsp-bridge"'face mode-face)))
+  (pcase-let ((`(,mode-text . ,mode-face) (lsp-bridge--mode-line-state)))
+    (when lsp-bridge-server
+      (propertize (format "lsp-bridge[%s]" mode-text) 'face mode-face))))
 
 (when lsp-bridge-enable-mode-line
   (add-to-list 'mode-line-misc-info

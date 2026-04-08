@@ -2,6 +2,7 @@
   "name": "expert",
   "languageId": "elixir",
   "command": ["expert", "--stdio"],
+  "forceTextDocumentSync": 1,
   "support-single-file": false,
   "projectFiles": ["mix.exs"],
   "settings": {

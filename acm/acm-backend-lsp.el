@@ -177,6 +177,7 @@ Below is available types:
 
 (defun acm-backend-lsp-init ()
   (setq-local acm-backend-lsp-server-command-exist t)
+  (setq-local lsp-bridge-server-status nil)
   (setq-local acm-backend-lsp-cache-candidates nil)
   (setq-local acm-backend-lsp-completion-position nil)
   (setq-local acm-backend-lsp-completion-trigger-characters nil)

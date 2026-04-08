@@ -16,7 +16,7 @@ class CompletionTriggerKind(Enum):
 class Completion(Handler):
     name = "completion"
     method = "textDocument/completion"
-    cancel_on_change = True
+    cancel_on_change = False
 
     def process_request(self, lsp_server, position, char, prefix, version) -> dict:
         self.method_server = lsp_server

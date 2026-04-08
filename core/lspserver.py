@@ -344,6 +344,7 @@ class LspServer:
         self.initialize_id = generate_request_id()
         self.server_name = server_name
         self.enable_diagnostics = enable_diagnostics
+        self.status = "starting"
         self.request_dict: Dict[int, Handler] = dict()
         self.root_path = self.project_path
         self.worksplace_folder = None
@@ -393,6 +394,7 @@ class LspServer:
             "source.organizeImports"]
         self.text_document_sync = 2 # refer TextDocumentSyncKind. Can be None = 0, Full = 1 or Incremental = 2
         self.save_include_text = False
+        self.apply_server_info_overrides()
 
         # Start LSP server.
         cwd = self.project_path
@@ -418,12 +420,30 @@ class LspServer:
 
         self.files: Dict[str, "FileAction"] = dict()
 
+    def sync_status_to_emacs(self, status, filepath=None):
+        self.status = status
+
+        if filepath is not None:
+            targets = [get_from_path_dict(self.files, filepath)] if is_in_path_dict(self.files, filepath) else []
+        else:
+            targets = list(self.files.values())
+
+        for file_action in targets:
+            eval_in_emacs(
+                "lsp-bridge-set-server-status",
+                file_action.filepath,
+                get_lsp_file_host(),
+                self.get_server_name(),
+                status
+            )
+
     def attach(self, fa: "FileAction"):
         if is_in_path_dict(self.files, fa.filepath):
             logger.error(f"File {fa.filepath} opened again before close.")
             return
 
         add_to_path_dict(self.files, fa.filepath, fa)
+        self.sync_status_to_emacs("ready" if self.sender.initialized.is_set() else self.status, fa.filepath)
 
         if len(self.files) == 1:
             # STEP 1: Say hello to LSP server.
@@ -444,6 +464,7 @@ class LspServer:
                 logger.error(traceback.format_exc())
 
     def send_initialize_request(self):
+        self.sync_status_to_emacs("initializing")
         self.worksplace_folder = get_emacs_func_result("get-workspace-folder", self.project_path)
         initialize_params = {
             "processId": os.getpid(),
@@ -905,6 +926,11 @@ class LspServer:
         if value is not None:
             setattr(self, attribute_name, value)
 
+    def apply_server_info_overrides(self):
+        force_text_document_sync = self.server_info.get("forceTextDocumentSync", None)
+        if force_text_document_sync in [0, 1, 2]:
+            self.text_document_sync = force_text_document_sync
+
     def save_attribute_from_message(self, message):
         # Fetch LSP server's capability provider.
         attributes_to_set = [
@@ -939,6 +965,8 @@ class LspServer:
         if isinstance(self.range_format_provider, dict):
             self.range_format_provider = self.range_format_provider.get("rangesSupport", self.range_format_provider)
 
+        self.apply_server_info_overrides()
+
         # Some LSP server has inlayHint capability, but won't response inlayHintProvider in capability message.
         # So we set `inlay_hint_provider` to True if found `forceInlayHint` option in config file.
         if "forceInlayHint" in self.server_info and self.server_info["forceInlayHint"] is True:
@@ -950,6 +978,7 @@ class LspServer:
         self.sender.send_notification("workspace/didChangeConfiguration", self.get_server_workspace_change_configuration(), init=True)
 
         self.sender.initialized.set()
+        self.sync_status_to_emacs("ready")
 
     def handle_workspace_message(self, message):
         if "method" not in message:
@@ -1215,6 +1244,7 @@ class LspServer:
     def close_file(self, filepath):
         # Send didClose notification when client close file.
         if is_in_path_dict(self.files, filepath):
+            eval_in_emacs("lsp-bridge-remove-server-status", filepath, get_lsp_file_host(), self.get_server_name())
             self.send_did_close_notification(filepath)
             remove_from_path_dict(self.files, filepath)
 
