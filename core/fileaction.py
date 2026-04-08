@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Dict, Tuple
 
 from core.handler import *
 from core.handler import Diagnostic
-from core.lspserver import LspServer, WORKSPACE_DIAGNOSTICS
+from core.lspserver import LspServer, WORKSPACE_DIAGNOSTICS, record_workspace_diagnostics
 from core.utils import *
 
 if TYPE_CHECKING:
@@ -472,9 +472,13 @@ class FileAction:
                     break
 
         if project_path:
-            proj = WORKSPACE_DIAGNOSTICS.setdefault(project_path, {})
-            file_entry = proj.setdefault(self.filepath, {})
-            file_entry[server_name] = self.diagnostics[server_name]
+            record_workspace_diagnostics(
+                project_path,
+                self.filepath,
+                self.diagnostics[server_name],
+                server_name,
+                diagnostic_version,
+            )
 
         if server_name in self.diagnostics_ticker:
             self.diagnostics_ticker[server_name] += 1
@@ -604,7 +608,8 @@ class FileAction:
 
 
     def rename_file(self, old_filepath, new_filepath):
-        self.get_lsp_servers()[0].send_did_rename_files_notification(old_filepath, new_filepath)
+        for lsp_server in self.get_lsp_servers():
+            lsp_server.send_did_rename_files_notification(old_filepath, new_filepath)
 
     def send_server_request(self, lsp_server, handler_name, *args, **kwargs):
         handler: Handler = self.method_handlers[lsp_server.server_info["name"]][handler_name]

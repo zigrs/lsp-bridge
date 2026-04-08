@@ -53,11 +53,30 @@ INLAY_HINT_REQUEST_ID_DICT = {}
 # Workspace-level diagnostics storage:
 # { project_path: { filepath: { server_name: [diagnostics...] } } }
 WORKSPACE_DIAGNOSTICS: Dict[str, Dict[str, Dict[str, list]]] = {}
+WORKSPACE_DIAGNOSTIC_VERSIONS: Dict[str, Dict[str, Dict[str, int]]] = {}
 
 def _workspace_diag_project(project_path: str) -> Dict[str, Dict[str, list]]:
     return WORKSPACE_DIAGNOSTICS.setdefault(project_path, {})
 
-def record_workspace_diagnostics(project_path: str, filepath: str, diagnostics: list, server_name: str):
+def _workspace_diag_version_project(project_path: str) -> Dict[str, Dict[str, int]]:
+    return WORKSPACE_DIAGNOSTIC_VERSIONS.setdefault(project_path, {})
+
+def record_workspace_diagnostics(project_path: str, filepath: str, diagnostics: list, server_name: str, version=None):
+    normalized_version = None
+    if version is not None:
+        try:
+            normalized_version = int(version)
+        except Exception:
+            normalized_version = None
+
+    if normalized_version is not None:
+        version_proj = _workspace_diag_version_project(project_path)
+        file_versions = version_proj.setdefault(filepath, {})
+        last_version = file_versions.get(server_name)
+        if last_version is not None and normalized_version < last_version:
+            return
+        file_versions[server_name] = normalized_version
+
     proj = _workspace_diag_project(project_path)
     file_entry = proj.setdefault(filepath, {})
     # Keep latest diagnostics per server
@@ -67,19 +86,27 @@ def clear_workspace_diagnostics_for_file(project_path: str, filepath: str):
     proj = _workspace_diag_project(project_path)
     if filepath in proj:
         proj.pop(filepath, None)
+    version_proj = _workspace_diag_version_project(project_path)
+    if filepath in version_proj:
+        version_proj.pop(filepath, None)
 
 class MultiFileHandler(FileSystemEventHandler):
     def __init__(self, lsp_server):
         self.lsp_server = lsp_server
         self.file_path_dict = {}
         self.dir_path_dict = {}
+        self.dir_watch_dict = {}
 
     def add_file(self, file_path, recursive=False):
         # Record whether this pattern should be matched recursively under its base directory.
         self._add_to_dict(self.file_path_dict, file_path, bool(recursive))
 
     def add_dir(self, dir_path, recursive=False):
-        self._add_to_dict(self.dir_path_dict, dir_path, recursive)
+        abs_dir = os.path.abspath(dir_path)
+        self.dir_path_dict[abs_dir] = bool(recursive)
+
+    def set_dir_watch(self, dir_path, watch):
+        self.dir_watch_dict[os.path.abspath(dir_path)] = watch
 
     def _add_to_dict(self, dictionary, path, value=None):
         dictionary[os.path.abspath(path)] = path if value is None else value
@@ -409,12 +436,12 @@ class LspServer:
         self.send_did_open_notification(fa)
 
     def lsp_message_dispatcher(self):
-        try:
-            while True:
-                message = self.receiver.get_message()
+        while True:
+            message = self.receiver.get_message()
+            try:
                 self.handle_recv_message(message["content"])
-        except:
-            logger.error(traceback.format_exc())
+            except Exception:
+                logger.error(traceback.format_exc())
 
     def send_initialize_request(self):
         self.worksplace_folder = get_emacs_func_result("get-workspace-folder", self.project_path)
@@ -851,7 +878,13 @@ class LspServer:
                 )
             else:
                 # File not opened in Emacs; keep diagnostics in workspace cache
-                record_workspace_diagnostics(self.project_path, filepath, diagnostics, self.server_info["name"])
+                record_workspace_diagnostics(
+                    self.project_path,
+                    filepath,
+                    diagnostics,
+                    self.server_info["name"],
+                    diagnostic_version
+                )
 
     def handle_dart_publish_closing_labels(self, message):
         if "method" in message and message["method"] == "dart/textDocument/publishClosingLabels":
@@ -919,6 +952,9 @@ class LspServer:
         self.sender.initialized.set()
 
     def handle_workspace_message(self, message):
+        if "method" not in message:
+            return
+
         if message["method"] == "workspace/configuration":
             self.handle_workspace_configuration_request(message["method"], message["id"], message["params"])
         elif message["method"] == "workspace/applyEdit":
@@ -936,15 +972,18 @@ class LspServer:
                 # After 'initialized' message finish, we should send 'workspace/didChangeConfiguration' notification.
                 # The setting parameters of each language server are different.
                 self.send_initialize_response(message)
+            elif "method" not in message:
+                handler = self.request_dict.pop(message["id"], None)
+                if handler is None:
+                    logger.debug("Ignore response with unknown request id: %s", message["id"])
+                    return
+
+                handler.handle_response(
+                    request_id=message["id"],
+                    response=message.get("result"),
+                )
             else:
-                if "method" not in message and message["id"] in self.request_dict:
-                    handler = self.request_dict[message["id"]]
-                    handler.handle_response(
-                        request_id=message["id"],
-                        response=message["result"],
-                    )
-                else:
-                    self.handle_workspace_message(message)
+                self.handle_workspace_message(message)
 
     def handle_work_done_progress_message(self, message):
         if "method" in message and message["method"] in ["window/workDoneProgress/create", "$/progress"]:
@@ -1062,6 +1101,7 @@ class LspServer:
             if self.workspace_file_watch_handler:
                 self.workspace_file_watch_handler.file_path_dict.clear()
                 self.workspace_file_watch_handler.dir_path_dict.clear()
+                self.workspace_file_watch_handler.dir_watch_dict.clear()
 
             self.workspace_file_watcher = None
             self.workspace_file_watch_handler = None
@@ -1090,9 +1130,21 @@ class LspServer:
 
             # Schedule directories, honoring recursion if any pattern requires it.
             for target_dir, recursive in dir_recursive.items():
-                if target_dir not in self.workspace_file_watch_handler.dir_path_dict:
-                    self.workspace_file_watcher.schedule(self.workspace_file_watch_handler, target_dir, recursive=recursive)
+                abs_target_dir = os.path.abspath(target_dir)
+                current_recursive = self.workspace_file_watch_handler.dir_path_dict.get(abs_target_dir)
+
+                if current_recursive is None:
+                    watch = self.workspace_file_watcher.schedule(self.workspace_file_watch_handler, target_dir, recursive=recursive)
                     self.workspace_file_watch_handler.add_dir(target_dir, recursive)
+                    self.workspace_file_watch_handler.set_dir_watch(target_dir, watch)
+                elif recursive and not current_recursive:
+                    existing_watch = self.workspace_file_watch_handler.dir_watch_dict.get(abs_target_dir)
+                    if existing_watch is not None and hasattr(self.workspace_file_watcher, "unschedule"):
+                        self.workspace_file_watcher.unschedule(existing_watch)
+
+                    watch = self.workspace_file_watcher.schedule(self.workspace_file_watch_handler, target_dir, recursive=True)
+                    self.workspace_file_watch_handler.add_dir(target_dir, True)
+                    self.workspace_file_watch_handler.set_dir_watch(target_dir, watch)
 
     def parse_workspace_watch_files(self, params):
         watches = []
