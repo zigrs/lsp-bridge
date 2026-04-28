@@ -1,4 +1,5 @@
 import os
+import queue
 import tempfile
 import threading
 import types
@@ -93,6 +94,9 @@ class LocalLspProtocolTest(unittest.TestCase):
         server.workspace_watch_timer = None
         server.workspace_watch_pending = {}
         server.workspace_watch_flush_delay = 0.2
+        server.project_file_reload_lock = threading.Lock()
+        server.project_file_reload_timer = None
+        server.project_file_reload_delay = 0.5
         server.workspace_file_watcher = None
         server.workspace_file_watch_handler = None
         server.files = {}
@@ -148,6 +152,39 @@ class LocalLspProtocolTest(unittest.TestCase):
             "pyright",
             "initializing",
         )
+
+    def test_process_monitor_reports_exited_server(self):
+        server = self.make_server("/tmp/project")
+        server.files["/tmp/project/a.py"] = types.SimpleNamespace(filepath="/tmp/project/a.py")
+        server.message_queue = queue.Queue()
+        server.lsp_subprocess = types.SimpleNamespace(wait=lambda: 7)
+        server.stop_workspace_watch_files = Mock()
+
+        with patch("core.lspserver.eval_in_emacs") as eval_in_emacs, \
+             patch("core.lspserver.message_emacs") as message_emacs:
+            server.monitor_lsp_process()
+
+        self.assertEqual(server.status, "exited")
+        eval_in_emacs.assert_called_once_with(
+            "lsp-bridge-set-server-status",
+            "/tmp/project/a.py",
+            "",
+            "pyright",
+            "exited",
+        )
+        message_emacs.assert_called_once_with("LSP server 'pyright' exited with code 7")
+        self.assertEqual(server.message_queue.get_nowait(), {
+            "name": "server_process_exit",
+            "content": "test-project#pyright",
+        })
+
+    def test_record_request_id_tracks_handler(self):
+        server = self.make_server("/tmp/project")
+        handler = types.SimpleNamespace(method="textDocument/completion")
+
+        server.record_request_id(99, handler)
+
+        self.assertEqual(server.request_dict[99], handler)
 
     def test_rename_file_notifies_all_multi_servers(self):
         rename_calls = []
@@ -449,6 +486,21 @@ class LocalLspProtocolTest(unittest.TestCase):
         self.assertEqual(params["changes"], [
             {"uri": "file:///tmp/project/a.json", "type": 3},
             {"uri": "file:///tmp/project/b.json", "type": 1},
+        ])
+
+    def test_project_file_change_triggers_rust_reload_workspace(self):
+        server = self.make_server("/tmp/project")
+        server.server_info["name"] = "rust-analyzer"
+        server.server_info["projectFiles"] = ["Cargo.toml"]
+        server.sender.initialized.set()
+
+        with patch("core.lspserver.threading.Timer", DummyTimer), \
+             patch("core.lspserver.generate_request_id", return_value=77):
+            server.handle_project_file_change("/tmp/project/Cargo.toml", 2)
+            server.flush_project_file_reload()
+
+        self.assertEqual(server.sender.requests, [
+            ("rust-analyzer/reloadWorkspace", None, 77, {}),
         ])
 
     def test_monitor_workspace_files_upgrades_existing_watch_to_recursive(self):

@@ -1064,8 +1064,31 @@ class LspBridge:
     def codeium_get_api_key(self, auth_token):
         self.codeium.get_api_key(auth_token)
 
+    def drop_file_action_for_exited_server(self, filepath, exited_server_name):
+        if not is_in_path_dict(FILE_ACTION_DICT, filepath):
+            return
+
+        action = get_from_path_dict(FILE_ACTION_DICT, filepath)
+        lsp_servers = list(action.org_lang_servers.values() if action.org_file else action.get_lsp_servers())
+
+        for lsp_server in lsp_servers:
+            if lsp_server.server_name == exited_server_name:
+                if is_in_path_dict(lsp_server.files, filepath):
+                    remove_from_path_dict(lsp_server.files, filepath)
+            elif lsp_server.server_name in LSP_SERVER_DICT:
+                lsp_server.close_file(filepath)
+
+        if is_in_path_dict(FILE_ACTION_DICT, filepath):
+            remove_from_path_dict(FILE_ACTION_DICT, filepath)
+
     def handle_server_process_exit(self, server_name):
         if server_name in LSP_SERVER_DICT:
+            lsp_server = LSP_SERVER_DICT[server_name]
+            attached_files = list(lsp_server.files.keys())
+
+            for filepath in attached_files:
+                self.drop_file_action_for_exited_server(filepath, server_name)
+
             log_time("Exit server {}".format(server_name))
             del LSP_SERVER_DICT[server_name]
 

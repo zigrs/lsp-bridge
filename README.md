@@ -9,12 +9,12 @@
   <a href="https://github.com/manateelazycat/lsp-bridge?tab=readme-ov-file#join-development"><strong>Join development</strong></a>
 <hr>
 
-
 # lsp-bridge
 
 The goal of lsp-bridge is to implement the fastest LSP client in the Emacs ecosystem using multi-threading technology, with a plug-and-play design philosophy to save you time and effort, because time is money.
 
 Advantages of lsp-bridge:
+
 1. Blazingly fast: Offload LSP request and data analysis to an external process, preventing Emacs from getting stuck due to delays or large data triggering garbage collection
 2. Remote Completion: Built-in support for remote server code completion, with various login methods such as passwords and public keys, supports tramp protocol and jump server, supports Docker
 3. Plug and play: Can be used immediately after installation, requires no additional configuration, no need to manually set up frontend completion, backend completion, or multi-backend integration configurations, code completion also works in org-mode src blocks
@@ -51,7 +51,7 @@ Advantages of lsp-bridge:
 
 Note: To enable completion in the terminal, please install the latest version of Emacs, which supports tty-child-frames.
 
-* If you are using straight to install, you should use the following configuration to install:
+- If you are using straight to install, you should use the following configuration to install:
 
 ```elisp
 (use-package lsp-bridge
@@ -62,7 +62,7 @@ Note: To enable completion in the terminal, please install the latest version of
   (global-lsp-bridge-mode))
 ```
 
-* If you are using `doom-emacs`
+- If you are using `doom-emacs`
 
 add this to your `packages.el`
 
@@ -109,6 +109,7 @@ It should be noted that lsp-bridge has three scanning modes:
 ## Remote Usage
 
 ### Remote SSH server
+
 `lsp-bridge` can perform code syntax completion on files on a remote server, similar to VSCode. The configuration steps are as follows:
 
 1. Install lsp-bridge and the corresponding LSP Server on the remote server.
@@ -141,11 +142,13 @@ Note:
 5. If you encounter errors like `remote file ... is updating info... skip call ...`, please ensure that you open the file via SSH and note that ivy-mode may interfere with `C-x C-f`
 
 ### Local devcontainer
+
 `lsp-bridge` now support completion on files on `devcontainer`, similar to VSCode. This is done by using [devcontainer-feature-emacs-lsp-bridge](https://github.com/nohzafk/devcontainer-feature-emacs-lsp-bridge).
 
 Here is a compelte configuration example
 
 #### devcontainer.json
+
 `.devcontainer/devcontainer.json`
 
 ``` json
@@ -170,6 +173,7 @@ Here is a compelte configuration example
 start the devcontainer and use `file-find` `/docker:user@container:/path/to/file` to open the file.
 
 If you use `apheleia` as formatter, `lsp-bridge` now support auto formatting file on devcontainer.
+
 ```elisp
 ;; setup PATH for remote command execution
 (with-eval-after-load 'tramp
@@ -259,6 +263,7 @@ more detail about using lsp-bridge in devcontainer please refer to [emacs-devcon
 - `lsp-bridge-breadcrumb-mode`: Enable or disable breadcrumb headline
 
 ## LSP server options
+
 lsp-bridge provides support for more than two language servers for many languages. You can customize the following options to choose the language server you prefer:
 
 - `lsp-bridge-c-lsp-server`: C language server, you can choose `clangd` or`ccls`
@@ -499,9 +504,10 @@ If your language supports mixed multi-language servers, it is recommended to che
 | Zig         | [zls](https://github.com/zigtools/zls)                                                             | Execute `zls config` to generate configuration for `zls`. see [Configuration Options](https://github.com/zigtools/zls#configuration-options)                                                                                                                          |
 | Solidity    | [solidity-language-server](https://github.com/NomicFoundation/hardhat-vscode)                      | `npm install -g @nomicfoundation/solidity-language-server`. see [Solidity Language Server](https://github.com/NomicFoundation/hardhat-vscode/blob/development/server/README.md)                                                                                     |
 
-
 ## FAQ
+
 ### Support capf
+
 Currently, the design of capf is not suitable for the LSP protocol. The capf completion backend is only suitable for non-LSP scenarios. You can enable completion by setting `(setq acm-enable-capf t)`.
 
 If there is no capf completion, please ensure that the current mode is present in `acm-backend-capf-mode-list`. If it's not in `acm-backend-capf-mode-list`, pull request are welcome.
@@ -557,9 +563,9 @@ For example, we can enable the Deno LSP server for Deno scripts with the followi
 ;; I recommand you write some code to compare project-path or file-path, return `deno' only if match target path.
 (setq lsp-bridge-get-single-lang-server-by-project
       (lambda (project-path file-path)
-	(when (or (string-suffix-p ".ts" file-path)
-		  (string-suffix-p ".tsx" file-path))
-	  "deno")))
+ (when (or (string-suffix-p ".ts" file-path)
+    (string-suffix-p ".tsx" file-path))
+   "deno")))
 ```
 
 Note: Some advanced LSP server, such as tailwindcss and emmet-ls, require a languageId and file extension that cannot be one-to-one corresponded. Instead, they dynamically return the languageId based on different frontend projects environment. In this case, you need to customize the `lsp-bridge-get-language-id` function to meet this requirement.
@@ -650,6 +656,7 @@ Then set option `lsp-bridge-log-level` to `debug` and happy hacking! ;)
 Please use `emacs -q` and load a minimal setup with only lsp-bridge to verify that the bug is reproducible. If `emacs -q` works fine, probably something is wrong with your Emacs config.
 
 If the problem still exists:
+
 1. Set option `lsp-bridge-log-level` to `debug`
 2. Use `lsp-bridge-restart-process` to restart the `LSP-BRIDGE` process
 3. Report issue with `*lsp-bridge*` buffer content, it contains many clues that can help us locate the problem faster
@@ -661,6 +668,7 @@ If you get a segfault error, please use the following way to collect crash infor
   3. Send issue with `*lsp-bridge*` buffer content when next crash
 
 ## Contributor
+
 lsp-bridge's rapid development couldn't have been possible without the strong support and selfless contributions from the community's experts. Without the community’s support, lsp-bridge wouldn’t be where it is today. Thank you to the loveliest people in the world, happy hacking ;)
 
 <a href = "https://github.com/manateelazycat/lsp-bridge/graphs/contributors">

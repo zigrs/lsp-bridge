@@ -1589,11 +1589,19 @@ So we build this macro to restore postion after code format."
   (lsp-bridge--with-file-buffer filename filehost
                                 (setq-local acm-backend-lsp-server-names server-names)))
 
+(defun lsp-bridge--active-server-names ()
+  (or (and (boundp 'acm-backend-lsp-server-names)
+           acm-backend-lsp-server-names)
+      (mapcar #'car lsp-bridge-server-status)))
+
+(defun lsp-bridge--server-status-text (server-name)
+  (or (cdr (assoc server-name lsp-bridge-server-status))
+      (and (member server-name (lsp-bridge--active-server-names))
+           "loading")))
+
 (defun lsp-bridge-show-lsp-status ()
   (interactive)
-  (let* ((server-names (or (and (boundp 'acm-backend-lsp-server-names)
-                                acm-backend-lsp-server-names)
-                           (mapcar #'car lsp-bridge-server-status)))
+  (let* ((server-names (lsp-bridge--active-server-names))
          (status-text
           (cond
            ((not (lsp-bridge-process-live-p))
@@ -1608,8 +1616,7 @@ So we build this macro to restore postion after code format."
              (lambda (server-name)
                (format "%s=%s"
                        server-name
-                       (or (cdr (assoc server-name lsp-bridge-server-status))
-                           "idle")))
+                       (lsp-bridge--server-status-text server-name)))
              server-names
              ", ")))))
     (message "[LSP-Bridge] LSP status: %s" status-text)))
@@ -3157,9 +3164,10 @@ We need exclude `markdown-code-fontification:*' buffer in `lsp-bridge-monitor-be
    ((and (boundp 'acm-backend-lsp-server-command-exist)
          (not acm-backend-lsp-server-command-exist))
     (cons "error" 'lsp-bridge-kill-mode-line))
-   (lsp-bridge-server-status
-    (let* ((statuses (mapcar #'cdr lsp-bridge-server-status))
-           (total (length statuses))
+   ((lsp-bridge--active-server-names)
+    (let* ((server-names (lsp-bridge--active-server-names))
+           (statuses (mapcar #'lsp-bridge--server-status-text server-names))
+           (total (length server-names))
            (ready (cl-count "ready" statuses :test #'equal)))
       (if (= ready total)
           (cons "ready" 'lsp-bridge-alive-mode-line)

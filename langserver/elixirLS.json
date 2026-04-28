@@ -1,7 +1,7 @@
 {
-  "name": "expert",
+  "name": "dexter",
   "languageId": "elixir",
-  "command": ["expert", "--stdio"],
+  "command": ["dexter", "lsp"],
   "forceTextDocumentSync": 1,
   "support-single-file": false,
   "projectFiles": ["mix.exs"],

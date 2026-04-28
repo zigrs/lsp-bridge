@@ -97,9 +97,19 @@ class MultiFileHandler(FileSystemEventHandler):
         self.dir_path_dict = {}
         self.dir_watch_dict = {}
 
-    def add_file(self, file_path, recursive=False):
-        # Record whether this pattern should be matched recursively under its base directory.
-        self._add_to_dict(self.file_path_dict, file_path, bool(recursive))
+    def add_file(self, file_path, recursive=False, notify=True, callback=None):
+        abs_path = os.path.abspath(file_path)
+        entry = self.file_path_dict.get(abs_path, {
+            "pattern": abs_path,
+            "recursive": False,
+            "notify": False,
+            "callbacks": [],
+        })
+        entry["recursive"] = entry["recursive"] or bool(recursive)
+        entry["notify"] = entry["notify"] or bool(notify)
+        if callback is not None and callback not in entry["callbacks"]:
+            entry["callbacks"].append(callback)
+        self.file_path_dict[abs_path] = entry
 
     def add_dir(self, dir_path, recursive=False):
         abs_dir = os.path.abspath(dir_path)
@@ -127,7 +137,8 @@ class MultiFileHandler(FileSystemEventHandler):
         src = os.path.abspath(event.src_path)
 
         # Match exact files and glob patterns (e.g. /base/*.mod)
-        for pattern, recursive in self.file_path_dict.items():
+        for pattern, entry in self.file_path_dict.items():
+            recursive = entry["recursive"]
             if recursive:
                 base_dir = os.path.dirname(pattern)
                 name_pat = os.path.basename(pattern)
@@ -136,11 +147,17 @@ class MultiFileHandler(FileSystemEventHandler):
                 except Exception:
                     under_base = src.startswith(base_dir)
                 if under_base and fnmatch.fnmatch(os.path.basename(src), name_pat):
-                    self.lsp_server.queue_workspace_did_change_watched_files(src, change_type)
+                    if entry["notify"]:
+                        self.lsp_server.queue_workspace_did_change_watched_files(src, change_type)
+                    for callback in entry["callbacks"]:
+                        callback(src, change_type)
                     break
             else:
                 if src == pattern or fnmatch.fnmatch(src, pattern):
-                    self.lsp_server.queue_workspace_did_change_watched_files(src, change_type)
+                    if entry["notify"]:
+                        self.lsp_server.queue_workspace_did_change_watched_files(src, change_type)
+                    for callback in entry["callbacks"]:
+                        callback(src, change_type)
                     break
 
 class LspServerSender(MessageSender):
@@ -230,10 +247,23 @@ class LspServerSender(MessageSender):
     def run(self) -> None:
         try:
             # Send "initialize" request.
-            self.send_message(self.init_queue.get())
+            while self.process.poll() is None:
+                try:
+                    self.send_message(self.init_queue.get(timeout=0.1))
+                    break
+                except queue.Empty:
+                    continue
+
+            if self.process.poll() is not None:
+                return
 
             # Wait until initialized.
-            self.initialized.wait()
+            while self.process.poll() is None:
+                if self.initialized.wait(timeout=0.1):
+                    break
+
+            if self.process.poll() is not None:
+                return
 
             # Send other initialization-related messages.
             while not self.init_queue.empty():
@@ -242,7 +272,10 @@ class LspServerSender(MessageSender):
 
             # Send all others.
             while self.process.poll() is None:
-                message = self.queue.get()
+                try:
+                    message = self.queue.get(timeout=0.1)
+                except queue.Empty:
+                    continue
                 self.send_message(message)
         except:
             logger.error(traceback.format_exc())
@@ -383,6 +416,10 @@ class LspServer:
         self.workspace_watch_timer = None
         self.workspace_watch_pending = {}
         self.workspace_watch_flush_delay = 0.2
+        self.project_file_reload_lock = threading.Lock()
+        self.project_file_reload_timer = None
+        self.project_file_reload_delay = 0.5
+        self.files: Dict[str, "FileAction"] = dict()
 
         self.code_action_kinds = [
             "quickfix",
@@ -414,11 +451,26 @@ class LspServer:
         self.sender = LspServerSender(self.lsp_subprocess, self.server_info["name"], self.project_name)
         self.sender.start()
 
+        self.process_monitor_thread = threading.Thread(target=self.monitor_lsp_process)
+        self.process_monitor_thread.start()
+
         # All LSP server response running in ls_message_thread.
         self.ls_message_thread = threading.Thread(target=self.lsp_message_dispatcher)
         self.ls_message_thread.start()
 
-        self.files: Dict[str, "FileAction"] = dict()
+    def monitor_lsp_process(self):
+        return_code = self.lsp_subprocess.wait()
+        log_time("LSP server '{}' process monitor exited with code {}".format(self.server_info["name"], return_code))
+
+        if len(self.files) > 0:
+            self.sync_status_to_emacs("exited")
+            message_emacs("LSP server '{}' exited with code {}".format(self.server_info["name"], return_code))
+
+        self.stop_workspace_watch_files()
+        self.message_queue.put({
+            "name": "server_process_exit",
+            "content": self.server_name
+        })
 
     def sync_status_to_emacs(self, status, filepath=None):
         self.status = status
@@ -731,6 +783,61 @@ class LspServer:
             "changes": changes
         })
 
+    def monitor_project_files(self):
+        project_root = self.project_path if os.path.isdir(self.project_path) else os.path.dirname(self.project_path)
+        watches = []
+
+        for project_file in self.server_info.get("projectFiles", []):
+            if not isinstance(project_file, str):
+                continue
+
+            file_pattern = os.path.normpath(os.path.join(project_root, project_file))
+            if os.path.isdir(os.path.dirname(file_pattern)):
+                watches.append({
+                    "pattern": file_pattern,
+                    "recursive": False,
+                })
+
+        self.monitor_workspace_files(watches, notify=False, callback=self.handle_project_file_change)
+
+    def get_project_file_paths(self):
+        project_root = self.project_path if os.path.isdir(self.project_path) else os.path.dirname(self.project_path)
+        return {
+            os.path.normpath(os.path.join(project_root, project_file))
+            for project_file in self.server_info.get("projectFiles", [])
+            if isinstance(project_file, str)
+        }
+
+    def handle_project_file_change(self, filepath, change_type):
+        if os.path.normpath(filepath) not in self.get_project_file_paths():
+            return
+
+        if self.server_info.get("name") == "rust-analyzer" and change_type in [1, 2, 3]:
+            self.queue_project_file_reload()
+
+    def queue_project_file_reload(self):
+        if not self.sender.initialized.is_set():
+            return
+
+        with self.project_file_reload_lock:
+            if self.project_file_reload_timer and self.project_file_reload_timer.is_alive():
+                self.project_file_reload_timer.cancel()
+
+            self.project_file_reload_timer = threading.Timer(
+                self.project_file_reload_delay,
+                self.flush_project_file_reload,
+            )
+            self.project_file_reload_timer.start()
+
+    def flush_project_file_reload(self):
+        with self.project_file_reload_lock:
+            self.project_file_reload_timer = None
+
+        if not self.sender.initialized.is_set():
+            return
+
+        self.sender.send_request("rust-analyzer/reloadWorkspace", None, generate_request_id())
+
     def send_did_change_notification(self, filepath, version, start, end, range_length, text):
         # STEP 5: Tell LSP server file content is changed.
         # This step is very IMPORTANT, make sure LSP server contain same content as client,
@@ -979,6 +1086,7 @@ class LspServer:
 
         self.sender.initialized.set()
         self.sync_status_to_emacs("ready")
+        self.monitor_project_files()
 
     def handle_workspace_message(self, message):
         if "method" not in message:
@@ -1122,6 +1230,10 @@ class LspServer:
                     self.workspace_watch_timer.cancel()
                 self.workspace_watch_timer = None
                 self.workspace_watch_pending.clear()
+            with self.project_file_reload_lock:
+                if self.project_file_reload_timer and self.project_file_reload_timer.is_alive():
+                    self.project_file_reload_timer.cancel()
+                self.project_file_reload_timer = None
 
             self.workspace_file_watcher.unschedule_all()
             self.workspace_file_watcher.stop()
@@ -1135,7 +1247,7 @@ class LspServer:
             self.workspace_file_watcher = None
             self.workspace_file_watch_handler = None
 
-    def monitor_workspace_files(self, watches):
+    def monitor_workspace_files(self, watches, notify=True, callback=None):
         if len(watches) > 0:
             # Init workspace watch files vars.
             self.start_workspace_watch_files()
@@ -1150,7 +1262,12 @@ class LspServer:
                     continue
 
                 # Add file pattern to notify list (carry recursive flag for matching semantics).
-                self.workspace_file_watch_handler.add_file(file_pattern, recursive)
+                self.workspace_file_watch_handler.add_file(
+                    file_pattern,
+                    recursive,
+                    notify=notify,
+                    callback=callback,
+                )
 
                 # Accumulate recursion requirement per directory.
                 target_dir = os.path.dirname(file_pattern)
