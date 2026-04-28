@@ -52,10 +52,15 @@ class MultiFileHandler(FileSystemEventHandler):
     def __init__(self, lsp_server):
         self.lsp_server = lsp_server
         self.file_path_dict = {}
+        self.dependency_file_path_dict = {}
         self.dir_path_dict = {}
 
     def add_file(self, file_path):
         self._add_to_dict(self.file_path_dict, file_path)
+
+    def add_dependency_file(self, file_path):
+        self._add_to_dict(self.file_path_dict, file_path)
+        self._add_to_dict(self.dependency_file_path_dict, file_path)
 
     def add_dir(self, dir_path):
         self._add_to_dict(self.dir_path_dict, dir_path)
@@ -72,9 +77,19 @@ class MultiFileHandler(FileSystemEventHandler):
     def on_deleted(self, event):
         self._handle_event(event, 3)
 
+    def on_moved(self, event):
+        self._handle_path(event.src_path, event.is_directory, 3)
+        self._handle_path(event.dest_path, event.is_directory, 1)
+
     def _handle_event(self, event, change_type):
-        if not event.is_directory and event.src_path in self.file_path_dict:
-            self.lsp_server.send_workspace_did_change_watched_files(event.src_path, change_type)
+        self._handle_path(event.src_path, event.is_directory, change_type)
+
+    def _handle_path(self, src_path, is_directory, change_type):
+        file_path = os.path.abspath(src_path)
+        if not is_directory and file_path in self.file_path_dict:
+            self.lsp_server.send_workspace_did_change_watched_files(file_path, change_type)
+            if file_path in self.dependency_file_path_dict:
+                self.lsp_server.handle_dependency_file_changed(file_path, change_type)
 
 class LspServerSender(MessageSender):
     def __init__(self, process: subprocess.Popen, server_name, project_name):
@@ -273,6 +288,7 @@ class LspServer:
         self.server_name = server_name
         self.enable_diagnostics = enable_diagnostics
         self.request_dict: Dict[int, Handler] = dict()
+        self.raw_request_dict = {}
         self.root_path = self.project_path
         self.worksplace_folder = None
 
@@ -306,6 +322,7 @@ class LspServer:
 
         self.workspace_file_watcher = None
         self.workspace_file_watch_handler = None
+        self.dependency_reload_timer = None
 
         self.code_action_kinds = [
             "quickfix",
@@ -613,6 +630,11 @@ class LspServer:
             }]
         })
 
+    def send_raw_workspace_request(self, method, params=None):
+        request_id = generate_request_id()
+        self.raw_request_dict[request_id] = method
+        self.sender.send_request(method, params, request_id)
+
     def send_did_change_notification(self, filepath, version, start, end, range_length, text):
         # STEP 5: Tell LSP server file content is changed.
         # This step is very IMPORTANT, make sure LSP server contain same content as client,
@@ -713,6 +735,13 @@ class LspServer:
         logger.error("Recv message (error):")
         logger.error(json.dumps(message, indent=3))
 
+        error_message = message["error"]["message"]
+
+        if "id" in message and message["id"] in self.raw_request_dict:
+            method = self.raw_request_dict.pop(message["id"])
+            message_emacs("{} failed: {}".format(method, error_message))
+            return
+
         # InlayHint will got error 'content modified' error if it followed immediately by a didChange request.
         # If we found this error, call lsp-bridge-inlay-hint-retry to send retry request.
         if "id" in message:
@@ -721,7 +750,6 @@ class LspServer:
                 resend_inlay_hint_request_after_content_modified_error(message)
                 return
 
-        error_message = message["error"]["message"]
         provider_attributes = {
             "Unhandled method completionItem/resolve": "completion_resolve_provider",
             "Unhandled method textDocument/prepareRename": "rename_prepare_provider",
@@ -837,6 +865,8 @@ class LspServer:
 
         self.sender.initialized.set()
 
+        self.monitor_dependency_files()
+
     def handle_workspace_message(self, message):
         if message["method"] == "workspace/configuration":
             self.handle_workspace_configuration_request(message["method"], message["id"], message["params"])
@@ -862,8 +892,12 @@ class LspServer:
                         request_id=message["id"],
                         response=message["result"],
                     )
-                else:
+                elif "method" not in message and message["id"] in self.raw_request_dict:
+                    self.raw_request_dict.pop(message["id"])
+                elif "method" in message:
                     self.handle_workspace_message(message)
+                else:
+                    logger.debug("Discard response with unknown request id: %s", message["id"])
 
     def handle_work_done_progress_message(self, message):
         if "method" in message and message["method"] in ["window/workDoneProgress/create", "$/progress"]:
@@ -975,6 +1009,54 @@ class LspServer:
                     self.workspace_file_watcher.schedule(self.workspace_file_watch_handler, target_dir, recursive=False)
                     self.workspace_file_watch_handler.add_dir(target_dir)
 
+    def monitor_dependency_files(self):
+        dependency_files = self.get_project_files()
+        if len(dependency_files) > 0:
+            self.start_workspace_watch_files()
+
+            for file_path in dependency_files:
+                self.workspace_file_watch_handler.add_dependency_file(file_path)
+
+                target_dir = os.path.dirname(file_path)
+                if target_dir not in self.workspace_file_watch_handler.dir_path_dict:
+                    self.workspace_file_watcher.schedule(self.workspace_file_watch_handler, target_dir, recursive=False)
+                    self.workspace_file_watch_handler.add_dir(target_dir)
+
+    def get_project_files(self):
+        files = []
+        for file_path in self.server_info.get("projectFiles", []):
+            if not os.path.isabs(file_path):
+                file_path = os.path.join(self.project_path, file_path)
+
+            parent_dir = os.path.dirname(file_path)
+            if os.path.exists(parent_dir):
+                files.append(os.path.abspath(file_path))
+
+        return list(dict.fromkeys(files))
+
+    def handle_dependency_file_changed(self, filepath, change_type):
+        reload_method = self.get_dependency_reload_method()
+        if not reload_method:
+            return
+
+        if self.dependency_reload_timer is not None and self.dependency_reload_timer.is_alive():
+            self.dependency_reload_timer.cancel()
+
+        self.dependency_reload_timer = threading.Timer(
+            0.5,
+            lambda: self.send_raw_workspace_request(reload_method)
+        )
+        self.dependency_reload_timer.start()
+
+    def get_dependency_reload_method(self):
+        return {
+            "rust-analyzer": "rust-analyzer/reloadWorkspace",
+        }.get(self.server_info["name"])
+
+    def cancel_dependency_reload_timer(self):
+        if self.dependency_reload_timer is not None and self.dependency_reload_timer.is_alive():
+            self.dependency_reload_timer.cancel()
+
     def parse_workspace_watch_files(self, params):
         patterns = []
         for registration in params['registrations']:
@@ -1038,6 +1120,7 @@ class LspServer:
             self.exit()
 
     def exit(self):
+        self.cancel_dependency_reload_timer()
         self.send_shutdown_request()
         self.send_exit_notification()
         # Don't need to wait LSP server response, kill immediately.
