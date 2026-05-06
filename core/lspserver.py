@@ -26,6 +26,7 @@ import queue
 import re
 import subprocess
 import threading
+import time
 import traceback
 from subprocess import PIPE
 from sys import stderr
@@ -404,6 +405,7 @@ class LspServer:
         #
         # So we include `sendSaveNotification` field for nil LSP server
         # because most of LSP server support send save notification.
+        self.open_close_provider = True
         self.save_file_provider = True
         if "sendSaveNotification" in server_info:
             self.save_file_provider = server_info["sendSaveNotification"]
@@ -715,6 +717,9 @@ class LspServer:
             return extension_name if language_id == "" else language_id
 
     def send_did_open_notification(self, fa: "FileAction"):
+        if not self.open_close_provider:
+            return
+
         self.sender.send_notification("textDocument/didOpen", {
             "textDocument": {
                 "uri": self.parse_document_uri(fa.filepath, fa.external_file_link),
@@ -725,6 +730,9 @@ class LspServer:
         })
 
     def send_did_close_notification(self, filepath):
+        if not self.open_close_provider:
+            return
+
         self.sender.send_notification("textDocument/didClose", {
             "textDocument": {
                 "uri": self.get_document_uri(filepath),
@@ -876,6 +884,7 @@ class LspServer:
         })
 
     def record_request_id(self, request_id: int, handler: Handler):
+        handler.request_start_time = time.monotonic()
         self.request_dict[request_id] = handler
 
     def send_shutdown_request(self):
@@ -1067,7 +1076,17 @@ class LspServer:
 
         # If the returned result is a dict, dig the deeper attributes.
         if isinstance(self.text_document_sync, dict):
-            self.text_document_sync = self.text_document_sync.get("change", self.text_document_sync)
+            sync_options = self.text_document_sync
+            if sync_options.get("openClose") is False:
+                self.open_close_provider = False
+
+            save_options = sync_options.get("save", None)
+            if save_options is not None:
+                self.save_file_provider = bool(save_options)
+                if isinstance(save_options, dict):
+                    self.save_include_text = bool(save_options.get("includeText", False))
+
+            self.text_document_sync = sync_options.get("change", 0)
 
         if isinstance(self.range_format_provider, dict):
             self.range_format_provider = self.range_format_provider.get("rangesSupport", self.range_format_provider)
@@ -1094,9 +1113,23 @@ class LspServer:
 
         if message["method"] == "workspace/configuration":
             self.handle_workspace_configuration_request(message["method"], message["id"], message["params"])
+        elif message["method"] == "workspace/workspaceFolders":
+            self.sender.send_response(message["id"], self.get_workspace_folders())
         elif message["method"] == "workspace/applyEdit":
             eval_in_emacs("lsp-bridge-workspace-apply-edit", message["params"]["edit"])
             self.sender.send_response(message["id"], { "applied": True })
+
+    def handle_window_message(self, message):
+        if message.get("method") != "window/showDocument" or "id" not in message:
+            return
+
+        uri = get_nested_value(message, ["params", "uri"])
+        if not isinstance(uri, str) or not uri.startswith("file:"):
+            self.sender.send_response(message["id"], {"success": False})
+            return
+
+        eval_in_emacs("find-file", uri_to_path(uri))
+        self.sender.send_response(message["id"], {"success": True})
 
     def handle_id_message(self, message):
         if "id" in message:
@@ -1115,12 +1148,30 @@ class LspServer:
                     logger.debug("Ignore response with unknown request id: %s", message["id"])
                     return
 
+                response_start_time = time.monotonic()
                 handler.handle_response(
                     request_id=message["id"],
                     response=message.get("result"),
                 )
+                if handler.method in [
+                    "textDocument/definition",
+                    "textDocument/typeDefinition",
+                    "textDocument/implementation",
+                    "textDocument/references",
+                ]:
+                    elapsed_ms = (time.monotonic() - getattr(handler, "request_start_time", response_start_time)) * 1000
+                    process_ms = (time.monotonic() - response_start_time) * 1000
+                    log_time("Handled {} response ({}) from '{}' for project {} in {:.1f} ms, client processing {:.1f} ms".format(
+                        handler.method,
+                        message["id"],
+                        self.server_info["name"],
+                        self.project_name,
+                        elapsed_ms,
+                        process_ms,
+                    ))
             else:
                 self.handle_workspace_message(message)
+                self.handle_window_message(message)
 
     def handle_work_done_progress_message(self, message):
         if "method" in message and message["method"] in ["window/workDoneProgress/create", "$/progress"]:
@@ -1197,6 +1248,8 @@ class LspServer:
 
     def handle_recv_message(self, message: dict):
         if "error" in message:
+            if "id" in message:
+                self.request_dict.pop(message["id"], None)
             self.handle_error_message(message)
             return
 

@@ -35,9 +35,9 @@ class FindImplementation(Handler):
                     references_dict[path] = [uri_info["range"]]
 
             references_counter = 0
-            references_content = ""
+            references_parts = []
             for i, (path, ranges) in enumerate(references_dict.items()):
-                references_content += "".join(["\n", REFERENCE_PATH, path, REFERENCE_ENDC, "\n"])
+                references_parts.extend(["\n", REFERENCE_PATH, path, REFERENCE_ENDC, "\n"])
 
                 for rg in ranges:
                     line = rg["start"]["line"]
@@ -45,14 +45,15 @@ class FindImplementation(Handler):
                     end_column = rg["end"]["character"]
                     line_content = linecache.getline(path, rg["start"]["line"] + 1)
 
-                    references_content += "{}:{}:{}".format(
+                    references_parts.append("{}:{}:{}".format(
                         line + 1,
                         start_column,
                         "".join([line_content[:start_column], REFERENCE_TEXT, line_content[start_column:end_column], REFERENCE_ENDC, line_content[end_column:]])
-                        )
+                        ))
                     references_counter += 1
 
             linecache.clearcache()  # clear line cache
-            references_content += "\n"
+            references_parts.append("\n")
+            references_content = "".join(references_parts)
 
             eval_in_emacs("lsp-bridge-references--popup", references_content, references_counter, self.pos)

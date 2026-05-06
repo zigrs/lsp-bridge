@@ -1,6 +1,6 @@
 from core.handler import Handler
 from core.utils import *
-from functools import cmp_to_key
+from heapq import nsmallest
 
 
 class CompletionWorkspaceSymbol(Handler):
@@ -15,17 +15,11 @@ class CompletionWorkspaceSymbol(Handler):
         query = ''.join(query.split())
         return dict(query=query)
 
-    def compare_candidates(self, x, y):
+    def candidate_sort_key(self, candidate):
         prefix = self.prefix.lower()
-        x_label, y_label = x["label"].lower(), y["label"].lower()
-        x_include_prefix, y_include_prefix = x_label.startswith(prefix), y_label.startswith(prefix)
-
-        # Sort by prefix.
-        if x_include_prefix != y_include_prefix:
-            return -1 if x_include_prefix else 1
-
-        # Sort by length.
-        return -1 if len(x_label) < len(y_label) else (1 if len(x_label) > len(y_label) else 0)
+        label = candidate["label"].lower()
+        prefix_rank = 0 if label.startswith(prefix) else 1
+        return (prefix_rank, len(label))
 
     def process_response(self, response: dict) -> None:
         if response is not None:
@@ -46,10 +40,12 @@ class CompletionWorkspaceSymbol(Handler):
 
                 completion_symbols.append(symbol)
 
-            completion_symbols = sorted(completion_symbols, key=cmp_to_key(self.compare_candidates))
-
             # Avoid returning too many items to cause Emacs to do GC operation.
-            completion_symbols = completion_symbols[:min(len(completion_symbols), self.file_action.completion_workspace_symbol_items_limit)]
+            max_items = self.file_action.completion_workspace_symbol_items_limit
+            if len(completion_symbols) > max_items:
+                completion_symbols = nsmallest(max_items, completion_symbols, key=self.candidate_sort_key)
+            else:
+                completion_symbols = sorted(completion_symbols, key=self.candidate_sort_key)
 
             if len(completion_symbols) > 0:
                 eval_in_emacs("lsp-bridge-completion-workspace-symbol--record-items",

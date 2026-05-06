@@ -16,6 +16,7 @@ class DummySender:
     def __init__(self):
         self.notifications = []
         self.requests = []
+        self.responses = []
         self.initialized = threading.Event()
 
     def send_notification(self, method, params, **kwargs):
@@ -23,6 +24,9 @@ class DummySender:
 
     def send_request(self, method, params, request_id, **kwargs):
         self.requests.append((method, params, request_id, kwargs))
+
+    def send_response(self, request_id, result, **kwargs):
+        self.responses.append((request_id, result, kwargs))
 
 
 class DummyTimer:
@@ -88,6 +92,9 @@ class LocalLspProtocolTest(unittest.TestCase):
         server.sender = DummySender()
         server.request_dict = {}
         server.text_document_sync = 2
+        server.open_close_provider = True
+        server.save_file_provider = True
+        server.save_include_text = False
         server.range_format_provider = False
         server.worksplace_folder = None
         server.workspace_watch_lock = threading.Lock()
@@ -244,6 +251,89 @@ class LocalLspProtocolTest(unittest.TestCase):
 
         self.assertEqual(server.text_document_sync, 1)
 
+    def test_sync_options_disable_open_close_and_save(self):
+        server = self.make_server("/tmp/project")
+
+        server.save_attribute_from_message({
+            "result": {
+                "capabilities": {
+                    "textDocumentSync": {
+                        "openClose": False,
+                        "change": 0,
+                        "save": False,
+                    }
+                }
+            }
+        })
+
+        self.assertFalse(server.open_close_provider)
+        self.assertFalse(server.save_file_provider)
+        self.assertEqual(server.text_document_sync, 0)
+
+        action = types.SimpleNamespace(
+            filepath="/tmp/project/a.py",
+            external_file_link=None,
+            read_file=lambda: "print('ok')",
+        )
+        server.send_did_open_notification(action)
+        server.send_did_close_notification("/tmp/project/a.py")
+        server.send_did_save_notification("/tmp/project/a.py", "a.py")
+
+        self.assertEqual(server.sender.notifications, [])
+
+    def test_error_response_clears_pending_request(self):
+        server = self.make_server("/tmp/project")
+        server.request_dict[99] = types.SimpleNamespace(method="textDocument/completion")
+
+        with patch("core.lspserver.message_emacs"):
+            server.handle_recv_message({
+                "jsonrpc": "2.0",
+                "id": 99,
+                "error": {
+                    "code": -32801,
+                    "message": "Content modified",
+                },
+            })
+
+        self.assertNotIn(99, server.request_dict)
+
+    def test_workspace_folders_request_gets_response(self):
+        server = self.make_server("/tmp/project")
+
+        with patch("core.lspserver.get_emacs_func_result", return_value="/tmp/workspaces/shared"):
+            server.send_initialize_request()
+        server.handle_recv_message({
+            "jsonrpc": "2.0",
+            "id": 13,
+            "method": "workspace/workspaceFolders",
+            "params": {},
+        })
+
+        self.assertEqual(server.sender.responses[-1], (
+            13,
+            [{
+                "name": "shared",
+                "uri": "file:///tmp/workspaces/shared",
+            }],
+            {},
+        ))
+
+    def test_show_document_request_opens_local_file_and_responds(self):
+        server = self.make_server("/tmp/project")
+
+        with patch("core.lspserver.eval_in_emacs") as eval_in_emacs:
+            server.handle_recv_message({
+                "jsonrpc": "2.0",
+                "id": 17,
+                "method": "window/showDocument",
+                "params": {
+                    "uri": "file:///tmp/project/main.go",
+                },
+            })
+
+        eval_in_emacs.assert_called_once_with("find-file", "/tmp/project/main.go")
+        self.assertEqual(server.sender.responses[-1], (17, {"success": True}, {}))
+
     def test_completion_response_survives_cursor_changes_when_buffer_version_matches(self):
         action = types.SimpleNamespace(
             last_change=(1.0, 1.0),
@@ -309,6 +399,21 @@ class LocalLspProtocolTest(unittest.TestCase):
             handler.handle_response(1, [{"label": "foobar", "kind": 3}])
 
         eval_in_emacs.assert_not_called()
+
+    def test_completion_workspace_symbol_respects_switch_and_min_length(self):
+        action = object.__new__(FileAction)
+        action.enable_completion_workspace_symbol = False
+        action.completion_workspace_symbol_min_length = 3
+        server = types.SimpleNamespace(workspace_symbol_provider=True)
+
+        self.assertFalse(action.should_send_completion_workspace_symbol(server, "abc"))
+
+        action.enable_completion_workspace_symbol = True
+        self.assertFalse(action.should_send_completion_workspace_symbol(server, "ab"))
+        self.assertTrue(action.should_send_completion_workspace_symbol(server, "abc"))
+
+        server.workspace_symbol_provider = False
+        self.assertFalse(action.should_send_completion_workspace_symbol(server, "abc"))
 
     def test_send_initialize_response_marks_server_ready(self):
         server = self.make_server("/tmp/project")

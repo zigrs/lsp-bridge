@@ -100,6 +100,8 @@ class FileAction:
          self.completion_items_limit,
          self.completion_match_mode,
          self.completion_case_mode,
+         self.enable_completion_workspace_symbol,
+         self.completion_workspace_symbol_min_length,
          self.completion_workspace_symbol_items_limit,
          self.insert_spaces,
          self.enable_push_diagnostics,
@@ -110,6 +112,8 @@ class FileAction:
              "acm-backend-lsp-candidates-max-number",
              "acm-backend-lsp-match-mode",
              "acm-backend-lsp-case-mode",
+             "acm-enable-lsp-workspace-symbol",
+             "acm-backend-lsp-workspace-symbol-candidate-min-length",
              "acm-backend-lsp-workspace-symbol-candidates-max-number",
              "indent-tabs-mode",
              "lsp-bridge-enable-diagnostics",
@@ -259,6 +263,8 @@ class FileAction:
         self.org_line_bias = org_line_bias
         buffer_content = get_buffer_content(self.filepath, buffer_name)
         for lsp_server in self.get_lsp_servers():
+            if lsp_server.text_document_sync == 0:
+                continue
             lsp_server.send_whole_change_notification(self.filepath, self.version, buffer_content)
         self.version += 1
 
@@ -311,15 +317,23 @@ class FileAction:
                     self.send_server_request(lsp_server, "completion", lsp_server, position, before_char, prefix, version)
 
                     # Send workspace symbol completion request.
-                    if lsp_server.workspace_symbol_provider:
+                    if self.should_send_completion_workspace_symbol(lsp_server, prefix):
                         self.send_server_request(lsp_server, "completion_workspace_symbol", lsp_server, prefix)
         else:
             # Send code completion request.
             self.send_server_request(self.single_server, "completion", self.single_server, position, before_char, prefix, version)
 
             # Send workspace symbol completion request.
-            if self.single_server.workspace_symbol_provider:
+            if self.should_send_completion_workspace_symbol(self.single_server, prefix):
                 self.send_server_request(self.single_server, "completion_workspace_symbol", self.single_server, prefix)
+
+    def should_send_completion_workspace_symbol(self, lsp_server, prefix):
+        if not self.enable_completion_workspace_symbol:
+            return False
+        if not lsp_server.workspace_symbol_provider:
+            return False
+        query = ''.join(prefix.split())
+        return len(query) >= self.completion_workspace_symbol_min_length
 
     def try_formatting(self, start, end, *args, **kwargs):
         if self.multi_servers:
