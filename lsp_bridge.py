@@ -907,7 +907,7 @@ class LspBridge:
         merge_emacs_exec_path()
 
         if len(lang_server_info["command"]) > 0:
-            server_command = lang_server_info["command"][0]
+            server_command = os.path.expanduser(lang_server_info["command"][0])
             server_command_path = shutil.which(server_command)
 
             if server_command_path:

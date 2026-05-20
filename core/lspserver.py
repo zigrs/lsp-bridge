@@ -322,6 +322,7 @@ class LspServer:
         cwd = self.project_path
         if os.path.isfile(self.project_path): # single file
             cwd = os.path.dirname(self.project_path)
+        logger.error(f"cwd:{cwd}")
         self.lsp_subprocess = subprocess.Popen(self.server_info["command"],
                                                bufsize=DEFAULT_BUFFER_SIZE,
                                                stdin=PIPE,
@@ -368,11 +369,10 @@ class LspServer:
             logger.error(traceback.format_exc())
 
     def send_initialize_request(self):
-        initialize_options = self.server_info.get("initializationOptions", {})
-
         self.worksplace_folder = get_emacs_func_result("get-workspace-folder", self.project_path)
+        workspace_folders = self.get_workspace_folders()
 
-        self.sender.send_request("initialize", {
+        initialize_params = {
             "processId": os.getpid(),
             "rootPath": self.root_path,
             "clientInfo": {
@@ -381,8 +381,37 @@ class LspServer:
             },
             "rootUri": path_to_uri(self.project_path),
             "capabilities": self.get_capabilities(),
-            "initializationOptions": initialize_options
-        }, self.initialize_id, init=True)
+            "initializationOptions": self.get_initialization_options()
+        }
+        if workspace_folders:
+            initialize_params["workspaceFolders"] = workspace_folders
+            log_time("Use workspace folders: {}".format(workspace_folders))
+
+        self.sender.send_request("initialize", initialize_params, self.initialize_id, init=True)
+
+    def get_workspace_folder_paths(self):
+        if isinstance(self.worksplace_folder, str):
+            workspace_folder_paths = [self.worksplace_folder]
+        elif isinstance(self.worksplace_folder, list) and self.worksplace_folder:
+            workspace_folder_paths = self.worksplace_folder
+        else:
+            workspace_folder_paths = [self.project_path]
+
+        paths = []
+        seen = set()
+        for workspace_folder_path in workspace_folder_paths:
+            if isinstance(workspace_folder_path, str) and workspace_folder_path:
+                path = os.path.abspath(os.path.expanduser(workspace_folder_path))
+                if path not in seen:
+                    paths.append(path)
+                    seen.add(path)
+        return paths
+
+    def get_workspace_folders(self):
+        return [{
+            "uri": path_to_uri(path),
+            "name": os.path.basename(os.path.normpath(path)) or path
+        } for path in self.get_workspace_folder_paths()]
 
     def get_capabilities(self):
         server_capabilities = self.server_info.get("capabilities", {})
@@ -461,7 +490,7 @@ class LspServer:
             }
         })
 
-        if isinstance(self.worksplace_folder, str):
+        if self.get_workspace_folder_paths():
             merge_capabilites = merge(merge_capabilites, {
                 "workspace": {
                      "workspaceFolders": True
@@ -495,16 +524,7 @@ class LspServer:
         return merge_capabilites
 
     def get_initialization_options(self):
-        initialization_options = self.server_info.get("initializationOptions", {})
-
-        if isinstance(self.worksplace_folder, str):
-            initialization_options = merge(initialization_options, {
-                "workspaceFolders": [
-                    self.worksplace_folder
-                ]
-            })
-
-        return initialization_options
+        return self.server_info.get("initializationOptions", {})
 
     def get_document_uri(self, filepath):
         """Get the document URI for a filepath, remapping .org files to a virtual
@@ -909,17 +929,23 @@ class LspServer:
                 eval_in_emacs("lsp-bridge--record-work-done-progress", "[LSP-Bridge] " + progress_message, file_paths)
 
     def handle_register_capability_message(self, message):
-        if "method" in message and message["method"] in ["client/registerCapability"]:
+        if "method" in message and message["method"] in ["client/registerCapability", "client/unregisterCapability"]:
             try:
-                for registration in message["params"]["registrations"]:
-                    if registration["method"] == "workspace/didChangeWatchedFiles":
-                        workspace_watch_files = self.parse_workspace_watch_files(message["params"])
-                        self.monitor_workspace_files(workspace_watch_files)
-                        log_time("Add workspace watch files: {}".format(workspace_watch_files))
-                    elif registration["method"] == "textDocument/formatting":
-                        self.code_format_provider = True
-                    elif registration["method"] == "textDocument/rangeFormatting":
-                        self.range_format_provider = True
+                if message["method"] == "client/registerCapability":
+                    for registration in message["params"]["registrations"]:
+                        if registration["method"] == "workspace/didChangeWatchedFiles":
+                            workspace_watch_files = self.parse_workspace_watch_files(message["params"])
+                            self.monitor_workspace_files(workspace_watch_files)
+                            log_time("Add workspace watch files: {}".format(workspace_watch_files))
+                        elif registration["method"] == "textDocument/formatting":
+                            self.code_format_provider = True
+                        elif registration["method"] == "textDocument/rangeFormatting":
+                            self.range_format_provider = True
+                else:
+                    for unregistration in message["params"].get("unregisterations", message["params"].get("unregistrations", [])):
+                        if unregistration["method"] == "workspace/didChangeWatchedFiles":
+                            self.stop_workspace_watch_files()
+                            log_time("Remove workspace watch files.")
             except:
                 log_time(traceback.format_exc())
 

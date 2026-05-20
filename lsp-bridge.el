@@ -869,7 +869,8 @@ you can customize `lsp-bridge-get-project-path-by-filepath' to return project pa
 
 (defcustom lsp-bridge-get-workspace-folder nil
   "In Java, sometimes, we need return same workspace folder for multiple projects,
-you can customize `lsp-bridge-get-workspace-folder' to return workspace folder path by give project path.")
+you can customize `lsp-bridge-get-workspace-folder' to return workspace folder
+path or a list of workspace folder paths by give project path.")
 
 (defvar lsp-bridge-indent-two-level 2)
 (defvar lsp-bridge-indent-four-level 4)

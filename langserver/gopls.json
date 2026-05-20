@@ -6,7 +6,7 @@
     "-remote=auto"
   ],
   "support-single-file": false,
-  "projectFiles": ["go.mod"],
+  "projectFiles": ["go.work", "go.mod"],
   "settings":{
     "gopls": {
       "usePlaceholders": true,
