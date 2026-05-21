@@ -1,4 +1,5 @@
 from core.handler import Handler
+from core.utils import eval_in_emacs
 
 class ExecuteCommand(Handler):
     name = "execute_command"
@@ -23,4 +24,5 @@ class ExecuteCommand(Handler):
         return dict(command=command, arguments=arguments)
 
     def process_response(self, response) -> None:
-        pass
+        if isinstance(response, dict) and ("documentChanges" in response or "changes" in response):
+            eval_in_emacs("lsp-bridge-workspace-apply-edit", response)

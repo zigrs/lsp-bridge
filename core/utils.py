@@ -221,6 +221,10 @@ def epc_arg_transformer(arg):
     (list 1 2 3)               => [1 2 3]
     (list 1 2 (list 3 4))      => [1 2 [3 4]]
     """
+    if (isinstance(arg, sexpdata.Symbol)
+            and arg.value() in [":json-false", "lsp-bridge-json-false"]):
+        return False
+
     if not isinstance(arg, list):
         return arg
 

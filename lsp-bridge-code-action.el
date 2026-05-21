@@ -346,7 +346,11 @@ Please read https://microsoft.github.io/language-server-protocol/specifications/
       (funcall handler action temp-buffer))
      ;; Arguments are for `workspaceApplyEdit'.
      ((and arguments
-           (cl-every (lambda (x) (or (plist-get x :documentChanges) (plist-get x :changes))) arguments))
+           (cl-every (lambda (x)
+                       (and (lsp-bridge-plistp x)
+                            (or (plist-get x :documentChanges)
+                                (plist-get x :changes))))
+                     arguments))
       (dolist (argument arguments)
         (lsp-bridge-workspace-apply-edit argument temp-buffer)))
      ;; Command is string, send `workspace/executeCommand' request to LSP server. arguments are cached in Python side.
@@ -376,6 +380,11 @@ Please read https://microsoft.github.io/language-server-protocol/specifications/
             (equal action-kind (plist-get action :kind)))
     (cons (plist-get action :title) action)))
 
+(defun lsp-bridge-code-action--json-true-p (value)
+  "Return non-nil only for JSON true-style VALUE."
+  (and value
+       (not (memq value '(:json-false lsp-bridge-json-false)))))
+
 (defun lsp-bridge-code-action--fix (actions action-kind)
   (let* ((menu-items
           (or
@@ -389,7 +398,8 @@ Please read https://microsoft.github.io/language-server-protocol/specifications/
                     "No code actions here"))))
          (preferred-action (cl-find-if
                             (lambda (menu-item)
-                              (plist-get (cdr menu-item) :isPreferred))
+                              (lsp-bridge-code-action--json-true-p
+                               (plist-get (cdr menu-item) :isPreferred)))
                             menu-items))
          (default-action (car (or preferred-action (car menu-items))))
          (action (if (and action-kind (null (cadr menu-items)))
