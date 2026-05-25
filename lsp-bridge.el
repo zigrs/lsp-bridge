@@ -1601,18 +1601,19 @@ So we build this macro to restore postion after code format."
   ;; make sure Emacs not do GC
   (let ((gc-cons-threshold most-positive-fixnum))
     (lsp-bridge--with-file-buffer filename filehost
-                                  ;; Save completion items.
-                                  (setq-local acm-backend-lsp-workspace-symbol-cache-candidates nil)
-                                  (setq-local acm-backend-lsp-workspace-symbol-server-names server-names)
+                                  (when acm-enable-lsp-workspace-symbol
+                                    ;; Save completion items.
+                                    (setq-local acm-backend-lsp-workspace-symbol-cache-candidates nil)
+                                    (setq-local acm-backend-lsp-workspace-symbol-server-names server-names)
 
-                                  (let* ((lsp-items acm-backend-lsp-workspace-symbol-items)
-                                         (completion-table (make-hash-table :test 'equal)))
-                                    (dolist (item candidates)
-                                      (plist-put item :annotation (capitalize (plist-get item :icon)))
-                                      (puthash (plist-get item :key) item completion-table))
-                                    (puthash server-name completion-table lsp-items)
-                                    (setq-local acm-backend-lsp-workspace-symbol-items lsp-items))
-                                  (lsp-bridge-try-completion))))
+                                    (let* ((lsp-items acm-backend-lsp-workspace-symbol-items)
+                                           (completion-table (make-hash-table :test 'equal)))
+                                      (dolist (item candidates)
+                                        (plist-put item :annotation (capitalize (plist-get item :icon)))
+                                        (puthash (plist-get item :key) item completion-table))
+                                      (puthash server-name completion-table lsp-items)
+                                      (setq-local acm-backend-lsp-workspace-symbol-items lsp-items))
+                                    (lsp-bridge-try-completion)))))
 
 (defun lsp-bridge-check-predicate (pred current-function)
   (if (functionp pred)
