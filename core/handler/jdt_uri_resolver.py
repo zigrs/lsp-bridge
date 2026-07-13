@@ -18,15 +18,22 @@ class JDTUriResolver(Handler):
         self.external_file_link = None
         self.start_pos = None
 
-    def process_request(self, uri, start_pos, define_jump_handler) -> dict:
+    def process_request(self, uri, start_pos, define_jump_handler, define_jump_args=(),
+                        failure_handler="lsp-bridge-find-def-fallback", failure_args=(),
+                        failure_position=None) -> dict:
         self.start_pos = start_pos
         self.external_file_link = uri
         self.define_jump_handler = define_jump_handler
+        self.define_jump_args = define_jump_args
+        self.failure_handler = failure_handler
+        self.failure_args = failure_args
+        self.failure_position = failure_position or start_pos
+        self.cancel_on_change = not define_jump_args
         return dict(uri=uri)
 
     def process_response(self, response: str):
         if not response:
-            message_emacs("No definition found.")
+            eval_in_emacs(self.failure_handler, self.failure_position, *self.failure_args)
             return
 
         if isinstance(response, str):
@@ -59,4 +66,4 @@ class JDTUriResolver(Handler):
 
             external_file = external_file.as_posix()
             self.file_action.create_external_file_action(external_file, self.external_file_link)
-            eval_in_emacs(self.define_jump_handler, external_file, get_lsp_file_host(), self.start_pos)
+            eval_in_emacs(self.define_jump_handler, external_file, get_lsp_file_host(), self.start_pos, *self.define_jump_args)

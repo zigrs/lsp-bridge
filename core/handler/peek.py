@@ -8,22 +8,34 @@ import linecache
 class PeekFindDefine(Handler):
     name = "peek_find_definition"
     method = "textDocument/definition"
-    cancel_on_change = True
+    # Peek has its own session id, so responses can be rejected explicitly in
+    # Emacs without leaving a silently discarded request pending forever.
+    cancel_on_change = False
 
-    def process_request(self, position) -> dict:
+    def process_request(self, position, session_id) -> dict:
         self.pos = position
+        self.session_id = session_id
         return dict(position=position)
 
     def process_response(self, response: Union[dict, list]) -> None:
-        find_define_response(self, response, "lsp-bridge-peek-define--return")
+        find_define_response(
+            self,
+            response,
+            "lsp-bridge-peek-define--return",
+            (self.session_id,),
+            "lsp-bridge-peek--request-failed",
+            (self.session_id, "definition"),
+        )
 
 class PeekFindReferences(Handler):
     name = "peek_find_references"
     method = "textDocument/references"
 
-    def process_request(self, position, define_position) -> dict:
+    def process_request(self, position, define_position, session_id, define_filepath) -> dict:
         self.pos = position
         self.define_pos = define_position
+        self.session_id = session_id
+        self.define_filepath = define_filepath
 
         return dict(
             position=position,
@@ -32,7 +44,7 @@ class PeekFindReferences(Handler):
 
     def process_response(self, response) -> None:
         if response is None:
-            eval_in_emacs("lsp-bridge-find-ref-fallback", self.pos)
+            eval_in_emacs("lsp-bridge-peek--request-failed", self.pos, self.session_id, "references")
         else:
             response = remove_duplicate_references(response)
             remote_connection_info = get_remote_connection_info()
@@ -53,7 +65,9 @@ class PeekFindReferences(Handler):
                     start_column = rg["start"]["character"]
 
                     # Don't return reference postion if it same as d
-                    if line == self.define_pos["line"] and start_column == self.define_pos["character"]:
+                    if (path == self.define_filepath
+                            and line == self.define_pos["line"]
+                            and start_column == self.define_pos["character"]):
                         continue
 
                     references_content += "{}\n{}\n{}\n".format(
@@ -65,4 +79,4 @@ class PeekFindReferences(Handler):
 
             linecache.clearcache()  # clear line cache
 
-            eval_in_emacs("lsp-bridge-peek-references--return", references_content, references_counter)
+            eval_in_emacs("lsp-bridge-peek-references--return", references_content, references_counter, self.session_id)

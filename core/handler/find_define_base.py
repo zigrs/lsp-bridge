@@ -1613,7 +1613,11 @@ def _get_solidity_server_name(obj):
     return server_name
 
 
-def _try_solidity_fallback(obj, define_jump_handler):
+def _eval_define_jump(define_jump_handler, define_jump_args, filepath, filehost, position):
+    eval_in_emacs(define_jump_handler, filepath, filehost, position, *define_jump_args)
+
+
+def _try_solidity_fallback(obj, define_jump_handler, define_jump_args=()):
     """Attempt Solidity-specific definition recovery.
     Called when the LSP returns empty response or file:///.
     Returns True if recovery succeeded and jump was performed."""
@@ -1644,7 +1648,7 @@ def _try_solidity_fallback(obj, define_jump_handler):
             if found_pos:
                 jump_pos = found_pos
         obj.file_action.create_external_file_action(recovered_file)
-        eval_in_emacs(define_jump_handler, recovered_file, get_lsp_file_host(), jump_pos)
+        _eval_define_jump(define_jump_handler, define_jump_args, recovered_file, get_lsp_file_host(), jump_pos)
         return True
 
     # Builtins (abi/msg/tx/block members, and Yul builtins in assembly) have no project definition.
@@ -1660,7 +1664,7 @@ def _try_solidity_fallback(obj, define_jump_handler):
         if result:
             target_file, target_pos = result
             obj.file_action.create_external_file_action(target_file)
-            eval_in_emacs(define_jump_handler, target_file, get_lsp_file_host(), target_pos)
+            _eval_define_jump(define_jump_handler, define_jump_args, target_file, get_lsp_file_host(), target_pos)
             return True
 
     # ── Strategy 2: scan all imports in current file for a named import of this symbol ──
@@ -1670,7 +1674,7 @@ def _try_solidity_fallback(obj, define_jump_handler):
             found_pos = _find_symbol_in_file(import_file, symbol_name, call_arity)
             jump_pos = found_pos or {"line": 0, "character": 0}
             obj.file_action.create_external_file_action(import_file)
-            eval_in_emacs(define_jump_handler, import_file, get_lsp_file_host(), jump_pos)
+            _eval_define_jump(define_jump_handler, define_jump_args, import_file, get_lsp_file_host(), jump_pos)
             return True
 
     # ── Strategy 2.6: struct field resolution (var[idx].field, var.field) ──
@@ -1679,7 +1683,7 @@ def _try_solidity_fallback(obj, define_jump_handler):
         if result:
             target_file, target_pos = result
             obj.file_action.create_external_file_action(target_file)
-            eval_in_emacs(define_jump_handler, target_file, get_lsp_file_host(), target_pos)
+            _eval_define_jump(define_jump_handler, define_jump_args, target_file, get_lsp_file_host(), target_pos)
             return True
 
     # ── Strategy 2.7: inheritance chain resolution ──
@@ -1688,7 +1692,7 @@ def _try_solidity_fallback(obj, define_jump_handler):
         if result:
             target_file, target_pos = result
             obj.file_action.create_external_file_action(target_file)
-            eval_in_emacs(define_jump_handler, target_file, get_lsp_file_host(), target_pos)
+            _eval_define_jump(define_jump_handler, define_jump_args, target_file, get_lsp_file_host(), target_pos)
             return True
 
     # ── Strategy 3: project-wide symbol search ──
@@ -1698,18 +1702,19 @@ def _try_solidity_fallback(obj, define_jump_handler):
     if result:
         recovered_file, start_position = result
         obj.file_action.create_external_file_action(recovered_file)
-        eval_in_emacs(define_jump_handler, recovered_file, get_lsp_file_host(), start_position)
+        _eval_define_jump(define_jump_handler, define_jump_args, recovered_file, get_lsp_file_host(), start_position)
         return True
 
     return False
 
 
-def find_define_response(obj, response, define_jump_handler) -> None:
+def find_define_response(obj, response, define_jump_handler, define_jump_args=(),
+                         fallback_handler="lsp-bridge-find-def-fallback", fallback_args=()) -> None:
     if not response:
         # For Solidity: empty response is common for named imports — try recovery.
-        if _try_solidity_fallback(obj, define_jump_handler):
+        if _try_solidity_fallback(obj, define_jump_handler, define_jump_args):
             return
-        eval_in_emacs("lsp-bridge-find-def-fallback", obj.pos)
+        eval_in_emacs(fallback_handler, obj.pos, *fallback_args)
         return
 
     file_info = response[0] if isinstance(response, list) else response
@@ -1721,20 +1726,26 @@ def find_define_response(obj, response, define_jump_handler) -> None:
     if file_uri.startswith("jdt://"):
         # for java
         message_emacs("Resolve path {} ...".format(file_uri))
-        obj.file_action.send_server_request(obj.file_action.single_server, "jdt_uri_resolver", file_uri, start_pos, define_jump_handler)
+        obj.file_action.send_server_request(
+            obj.file_action.single_server, "jdt_uri_resolver", file_uri, start_pos,
+            define_jump_handler, define_jump_args, fallback_handler, fallback_args, obj.pos)
     elif file_uri.startswith("csharp:/metadata/"):
         # for csharp
         message_emacs("Resolve path {} ...".format(file_uri))
-        obj.file_action.send_server_request(obj.file_action.single_server, "csharp_uri_resolver", file_uri, start_pos, define_jump_handler)
+        obj.file_action.send_server_request(
+            obj.file_action.single_server, "csharp_uri_resolver", file_uri, start_pos,
+            define_jump_handler, define_jump_args, fallback_handler, fallback_args, obj.pos)
     elif file_uri.startswith("jar://"):
         # for clojure
-        raise NotImplementedError()
+        eval_in_emacs(fallback_handler, obj.pos, *fallback_args)
     elif file_uri.startswith("deno:"):
         # for deno
         # Deno will return targetUri like "deno:asset/lib.deno.ns.d.ts",
         # so we need send server deno/virtualTextDocument to request virtual text document from Deno.
         message_emacs("Resolve path {} ...".format(file_uri))
-        obj.file_action.send_server_request(obj.file_action.single_server, "deno_uri_resolver", file_uri, start_pos, define_jump_handler)
+        obj.file_action.send_server_request(
+            obj.file_action.single_server, "deno_uri_resolver", file_uri, start_pos,
+            define_jump_handler, define_jump_args, fallback_handler, fallback_args, obj.pos)
     else:
         # for normal file uri
         filepath = uri_to_path(file_uri)
@@ -1747,15 +1758,15 @@ def find_define_response(obj, response, define_jump_handler) -> None:
 
             if file_uri == "file:///":
                 # Solidity (and possibly other servers) return file:/// as a "no definition" placeholder.
-                if _try_solidity_fallback(obj, define_jump_handler):
+                if _try_solidity_fallback(obj, define_jump_handler, define_jump_args):
                     return
 
                 message_emacs("No definition found: language server returned root URI placeholder (file:///).")
 
-            eval_in_emacs("lsp-bridge-find-def-fallback", obj.pos)
+            eval_in_emacs(fallback_handler, obj.pos, *fallback_args)
             return
         obj.file_action.create_external_file_action(filepath)
-        eval_in_emacs(define_jump_handler, filepath, get_lsp_file_host(), start_pos)
+        _eval_define_jump(define_jump_handler, define_jump_args, filepath, get_lsp_file_host(), start_pos)
 
 def create_decompile_external_file(uri_resolver, language_dir, decompile_dir, source_code):
     '''Some LSP server, such as Java or C#, LSP server need decompile source code to *external* file before jump to definition in *original* file.

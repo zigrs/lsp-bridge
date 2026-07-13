@@ -120,9 +120,12 @@ bounds as returned by `lsp-bridge--search-symbols'.")
   "Non-nil means the content in the peek window is updated.")
 
 (defvar lsp-bridge-peek--temp-buffer-alist nil
-  "Files and their temporary buffers that don't exist before peeking.
-Its keys are file paths, values are buffers.  The buffers will be
+  "Temporary buffers created for files that weren't already visited.
+The buffers will be
 killed after disabling `lsp-bridge-peek--mode'.")
+
+(defvar lsp-bridge-peek--buffer-alist nil
+  "Map file paths to buffers used to render their peek contents.")
 
 (defvar lsp-bridge-peek-chosen-displaying-list '(nil nil nil)
   "Information saved to display the definition or reference.
@@ -153,6 +156,58 @@ stores how many lines the file content was moved.")
 The first is the buffer which need killing. The second is the position before ace peek.
 The third is the buffer before ace peek. The fourth is the buffer where the symbol is.
 The fifth is the position where the symbol is.")
+
+(defvar lsp-bridge-peek--request-counter 0
+  "Monotonic counter used to identify asynchronous peek requests.")
+
+(defvar lsp-bridge-peek--active-request nil
+  "Plist describing the active asynchronous peek request.")
+
+(defun lsp-bridge-peek--next-request-id ()
+  "Return a new peek request identifier."
+  (setq lsp-bridge-peek--request-counter
+        (1+ lsp-bridge-peek--request-counter)))
+
+(defun lsp-bridge-peek--request-active-p (session-id)
+  "Return non-nil when SESSION-ID is the active peek request."
+  (equal session-id (plist-get lsp-bridge-peek--active-request :id)))
+
+(defun lsp-bridge-peek--arm-request-timeout (session-id stage)
+  "Start or reset the timeout for SESSION-ID at STAGE."
+  (when (lsp-bridge-peek--request-active-p session-id)
+    (when-let* ((timer (plist-get lsp-bridge-peek--active-request :timer)))
+      (cancel-timer timer))
+    (setq lsp-bridge-peek--active-request
+          (plist-put
+           lsp-bridge-peek--active-request :timer
+           (run-at-time lsp-bridge-peek-request-timeout nil
+                        #'lsp-bridge-peek--request-failed
+                        nil session-id (concat stage " timeout"))))))
+
+(defun lsp-bridge-peek--cleanup-request (&optional session-id)
+  "Clean up the active request when it matches SESSION-ID.
+When SESSION-ID is nil, clean up unconditionally."
+  (when (and lsp-bridge-peek--active-request
+             (or (null session-id)
+                 (lsp-bridge-peek--request-active-p session-id)))
+    (let ((temp-buffer (plist-get lsp-bridge-peek--active-request
+                                  :temporary-buffer)))
+      (when-let* ((timer (plist-get lsp-bridge-peek--active-request :timer)))
+        (cancel-timer timer))
+      (dolist (key '(:origin-marker :target-marker))
+        (when-let* ((marker (plist-get lsp-bridge-peek--active-request key)))
+          (set-marker marker nil)))
+      (when (buffer-live-p temp-buffer)
+        (kill-buffer temp-buffer)))
+    (setq lsp-bridge-peek--active-request nil
+          lsp-bridge-peek-symbol-at-point nil
+          lsp-bridge-peek-ace-list nil)))
+
+(defun lsp-bridge-peek--request-failed (_position session-id stage)
+  "Finish SESSION-ID after an unsuccessful STAGE request."
+  (when (lsp-bridge-peek--request-active-p session-id)
+    (lsp-bridge-peek--cleanup-request session-id)
+    (message "[LSP-Bridge] Peek %s not found." stage)))
 
 (defface lsp-bridge-peek--highlight-symbol-face
   `((t :foreground "white" :background "#623d73"))
@@ -188,6 +243,11 @@ height and background properties of the face."
 (defcustom lsp-bridge-peek-list-height 3
   "Number of definitions/references displayed in the peek window."
   :type 'integer
+  :group 'lsp-bridge-peek)
+
+(defcustom lsp-bridge-peek-request-timeout 10
+  "Seconds to wait for each asynchronous peek response."
+  :type 'number
   :group 'lsp-bridge-peek)
 
 (defcustom lsp-bridge-peek-ace-keys '(?a ?s ?d ?f ?j ?k ?l ?\;)
@@ -227,6 +287,9 @@ height and background properties of the face."
     (define-key map (kbd "k") 'lsp-bridge-peek-tree-previous-branch)
     (define-key map (kbd "j") 'lsp-bridge-peek-tree-next-branch)
 
+    ;; Peek through
+    (define-key map (kbd "t") 'lsp-bridge-peek-through)
+
     ;; Jump
     (define-key map (kbd "M-l j") 'lsp-bridge-peek-jump)
     (define-key map (kbd "M-l b") 'lsp-bridge-peek-jump-back)
@@ -254,7 +317,15 @@ which take care of setting up other things."
     (setq lsp-bridge-peek--ov
 	      (let ((ov-pos (line-end-position)))
 	        (make-overlay ov-pos ov-pos)))
-    (overlay-put lsp-bridge-peek--ov 'window (selected-window))
+    (let ((origin-window
+           (plist-get lsp-bridge-peek--active-request :origin-window)))
+      (overlay-put
+       lsp-bridge-peek--ov 'window
+       (if lsp-bridge-peek--active-request
+           (and (window-live-p origin-window)
+                (eq (window-buffer origin-window) (current-buffer))
+                origin-window)
+         (selected-window))))
     (let* ((bg-mode (frame-parameter nil 'background-mode))
 	       (bg-unspecified-p (string= (face-background 'default)
                                       "unspecified-bg"))
@@ -286,11 +357,13 @@ which take care of setting up other things."
     (setf (nth 2 lsp-bridge-peek-chosen-displaying-list) (1- lsp-bridge-peek-list-height))
     (add-hook 'post-command-hook #'lsp-bridge-peek--show nil 'local))
    (t
+    (lsp-bridge-peek--cleanup-request)
     (when lsp-bridge-peek--ov (delete-overlay lsp-bridge-peek--ov))
     (mapc (lambda (pair)
 	        (kill-buffer pair))
 	      lsp-bridge-peek--temp-buffer-alist)
     (setq lsp-bridge-peek--temp-buffer-alist nil
+	      lsp-bridge-peek--buffer-alist nil
 	      lsp-bridge-peek--ov nil
 	      lsp-bridge-peek--bg nil
 	      lsp-bridge-peek--bg-alt nil
@@ -369,9 +442,25 @@ not affected by its surroundings."
   (propertize "\n"
 	          'face 'lsp-bridge-peek-border-face))
 
+(defun lsp-bridge-peek--position-to-point (position)
+  "Convert UTF-16 LSP POSITION to an Emacs buffer position."
+  (save-excursion
+    ;; Let the shared converter determine the start of the LSP line.  In
+    ;; particular, Org Babel positions are relative to the source block.
+    (goto-char (acm-backend-lsp-position-to-point
+                (list :line (plist-get position :line) :character 0)))
+    (let ((units (plist-get position :character)))
+      (while (and (> units 0) (not (eolp)))
+        (let ((width (if (> (char-after) #xffff) 2 1)))
+          (if (< units width)
+              (setq units 0)
+            (forward-char 1)
+            (setq units (- units width))))))
+    (point)))
+
 (defun lsp-bridge-peek--get-content (pos content-move)
   (setq file-content nil)
-  (goto-char (acm-backend-lsp-position-to-point pos))
+  (goto-char (lsp-bridge-peek--position-to-point pos))
   (let* ((beg (save-excursion
 		        (forward-line content-move)
 		        (line-beginning-position)))
@@ -389,6 +478,22 @@ not affected by its surroundings."
     (remove-text-properties highlight-begin highlight-end 'face))
   file-content)
 
+(defun lsp-bridge-peek--find-file-buffer (file)
+  "Return a buffer containing FILE for rendering and ace selection."
+  (or (find-buffer-visiting file)
+      (let ((buffer (alist-get file lsp-bridge-peek--buffer-alist
+                               nil nil #'equal)))
+        (and (buffer-live-p buffer) buffer))
+      (let ((buffer (generate-new-buffer
+                     (format " *lsp-bridge-peek-%s*" file))))
+        (with-current-buffer buffer
+          (insert-file-contents file)
+          (let ((buffer-file-name file))
+            (delay-mode-hooks (set-auto-mode))))
+        (push (cons file buffer) lsp-bridge-peek--buffer-alist)
+        (push buffer lsp-bridge-peek--temp-buffer-alist)
+        buffer)))
+
 (defun lsp-bridge--attach-ace-str (str sym-bounds bound-offset ace-seqs)
   "Return a copy of STR with ace strings attached.
 SYM-BOUNDS specifies the symbols in STR, as returned by
@@ -398,15 +503,24 @@ returned by `lsp-bridge-peek--ace-key-seqs' or `lsp-bridge-peek--pop-ace-key-seq
 The beginnings of each symbol are replaced by ace strings with
 `lsp-bridge-peek-ace-string-face' attached."
   (let* ((nsyms (length sym-bounds))
-         (new-str (copy-sequence str)))
+         (new-str (string-to-multibyte (copy-sequence str))))
     (dotimes (n nsyms)
-      (when (nth n ace-seqs)
-        (let* ((beg (- (car (nth n sym-bounds)) bound-offset))
-               (end (- (cdr (nth n sym-bounds)) bound-offset))
-               (ace-seq (nth n ace-seqs))
-               (ace-str-len (min (length ace-seq) (- end beg))))
+      (when-let* ((ace-seq (nth n ace-seqs))
+                  (bounds (nth n sym-bounds))
+                  (beg (- (car bounds) bound-offset))
+                  (end (- (cdr bounds) bound-offset))
+                  ((<= 0 beg))
+                  ((< beg end))
+                  ((< beg (length new-str))))
+        (let ((ace-str-len (min (length ace-seq)
+                                (- end beg)
+                                (- (length new-str) beg))))
           (dotimes (idx ace-str-len)
-            (aset new-str (+ beg idx) (nth idx ace-seq)))
+            (let ((pos (+ beg idx)))
+              (setq new-str
+                    (concat (substring new-str 0 pos)
+                            (char-to-string (nth idx ace-seq))
+                            (substring new-str (1+ pos))))))
           (put-text-property beg (+ beg ace-str-len)
                              'face 'lsp-bridge-peek-ace-str-face new-str))))
     new-str))
@@ -421,19 +535,11 @@ The beginnings of each symbol are replaced by ace strings with
 	     (file (nth n path-list))
 	     (pos (nth n pos-list))
 	     (content-move (nth n content-move-list))
-	     (buf-name (format "*lsp-bridge-peek-%s*" file))
+	     (buffer (lsp-bridge-peek--find-file-buffer file))
 	     (file-content nil))
-    (if (not (member buf-name lsp-bridge-peek--temp-buffer-alist))
-	    (let ((buf (generate-new-buffer buf-name)))
-	      (with-current-buffer buf
-	        (insert-file-contents file)
-	        (let ((buffer-file-name file))
-	          (delay-mode-hooks
-		        (set-auto-mode)))
-	        (setq file-content (lsp-bridge-peek--get-content pos content-move))
-	        (add-to-list 'lsp-bridge-peek--temp-buffer-alist buf-name)))
-      (with-current-buffer buf-name
-	    (setq file-content (lsp-bridge-peek--get-content pos content-move))))
+    (with-current-buffer buffer
+      (save-excursion
+        (setq file-content (lsp-bridge-peek--get-content pos content-move))))
     (when (and lsp-bridge-peek--symbol-bounds lsp-bridge-peek--ace-seqs)
       (setq file-content
 	        (lsp-bridge--attach-ace-str file-content
@@ -518,79 +624,92 @@ The beginnings of each symbol are replaced by ace strings with
 					                           :extend t))
     history-string))
 
-(defun lsp-bridge-peek-define--return (filename filehost position)
-  (setq filename (concat (cdr (assoc filehost lsp-bridge-tramp-alias-alist)) filename))
-  (push filename (nth 1 lsp-bridge-peek-symbol-at-point))
-  (push position (nth 2 lsp-bridge-peek-symbol-at-point))
-  (push 0 (nth 6 lsp-bridge-peek-symbol-at-point))
-  (if (not (= (length lsp-bridge-peek-ace-list) 0))
-      (with-current-buffer (nth 3 lsp-bridge-peek-ace-list)
-	    (goto-char (nth 4 lsp-bridge-peek-ace-list))
-	    (lsp-bridge-call-file-api "peek_find_references" (lsp-bridge--position) position))
-    (lsp-bridge-call-file-api "peek_find_references" (lsp-bridge--position) position)))
+(defun lsp-bridge-peek-define--return (filename filehost position session-id)
+  "Handle a definition response belonging to SESSION-ID."
+  (when (lsp-bridge-peek--request-active-p session-id)
+    (setq filename (concat (cdr (assoc filehost lsp-bridge-tramp-alias-alist))
+                           filename))
+    (push filename (nth 1 lsp-bridge-peek-symbol-at-point))
+    (push position (nth 2 lsp-bridge-peek-symbol-at-point))
+    (push 0 (nth 6 lsp-bridge-peek-symbol-at-point))
+    (let ((target-buffer (plist-get lsp-bridge-peek--active-request
+                                    :target-buffer))
+          (target-marker (plist-get lsp-bridge-peek--active-request
+                                    :target-marker)))
+      (if (and (buffer-live-p target-buffer)
+               target-marker
+               (marker-position target-marker))
+          (with-current-buffer target-buffer
+            (save-excursion
+              (goto-char target-marker)
+              (lsp-bridge-peek--arm-request-timeout session-id "references")
+              (unless (lsp-bridge-call-file-api
+                       "peek_find_references"
+                       (lsp-bridge--position) position session-id filename)
+                (lsp-bridge-peek--request-failed
+                 nil session-id "references"))))
+        (lsp-bridge-peek--request-failed nil session-id "target buffer")))))
 
-(defun lsp-bridge-peek-references--return (references-content references-counter)
-  (if references-content
-      (let ((buf (generate-new-buffer "*lsp-bridge-peek--temp-buffer*")))
-	    (with-current-buffer buf
-	      (insert references-content)
-	      (goto-char (point-min))
-	      (dotimes (n references-counter)
-	        (let ((beg (point))
-		          (end nil)
-		          (filename nil)
-		          (pos nil))
-	          (move-end-of-line 1)
-	          (setq end (point))
-	          (setq line (buffer-substring beg end))
-	          (forward-line 1)
-	          (setq beg (point))
-	          (move-end-of-line 1)
-	          (setq end (point))
-	          (setq char (buffer-substring beg end))
-	          (forward-line 1)
-	          (setq beg (point))
-	          (move-end-of-line 1)
-	          (setq end (point))
-	          (forward-line 1)
-	          (setq filename (buffer-substring beg end))
-	          (setq pos (list :line (string-to-number line) :character (string-to-number char)))
-	          (push filename (nth 1 lsp-bridge-peek-symbol-at-point))
-	          (push pos (nth 2 lsp-bridge-peek-symbol-at-point))
-		      (setf (nth 6 lsp-bridge-peek-symbol-at-point)
-			        (nreverse (nth 6 lsp-bridge-peek-symbol-at-point)))
-		      (push (- (/ lsp-bridge-peek-file-content-height 2)) (nth 6 lsp-bridge-peek-symbol-at-point))
-		      (setf (nth 6 lsp-bridge-peek-symbol-at-point)
-			        (nreverse (nth 6 lsp-bridge-peek-symbol-at-point))))))
-	    (setf (nth 1 lsp-bridge-peek-symbol-at-point)
-	          (nreverse (nth 1 lsp-bridge-peek-symbol-at-point))
-	          (nth 2 lsp-bridge-peek-symbol-at-point)
-	          (nreverse (nth 2 lsp-bridge-peek-symbol-at-point)))
-	    (kill-buffer buf)))
-  (if lsp-bridge-peek-selected-symbol
-      (progn
-	    (push (length lsp-bridge-peek-symbol-tree)
-	          (nth 4 (nth lsp-bridge-peek-selected-symbol lsp-bridge-peek-symbol-tree)))
-	    (unless (nth 5 (nth lsp-bridge-peek-selected-symbol lsp-bridge-peek-symbol-tree))
-	      (setf (nth 5 (nth lsp-bridge-peek-selected-symbol lsp-bridge-peek-symbol-tree)) 0))))
-  (setf (nth 3 lsp-bridge-peek-symbol-at-point) lsp-bridge-peek-selected-symbol)
-  (setf (nth 5 lsp-bridge-peek-symbol-at-point) 0)
-  (setq lsp-bridge-peek-selected-symbol (length lsp-bridge-peek-symbol-tree))
-  (setq lsp-bridge-peek-symbol-tree (nreverse lsp-bridge-peek-symbol-tree))
-  (push lsp-bridge-peek-symbol-at-point lsp-bridge-peek-symbol-tree)
-  (setq lsp-bridge-peek-symbol-at-point nil)
-  (setq lsp-bridge-peek-symbol-tree (nreverse lsp-bridge-peek-symbol-tree))
-  (if (not (= (length lsp-bridge-peek-ace-list) 0))
-      (progn
-	    (if (nth 0 lsp-bridge-peek-ace-list)
-	        (kill-buffer (nth 0 lsp-bridge-peek-ace-list)))
-	    (switch-to-buffer (nth 2 lsp-bridge-peek-ace-list))
-	    (goto-char (nth 1 lsp-bridge-peek-ace-list))))
-  (if (not lsp-bridge-peek-mode)
-      (progn
-	    (lsp-bridge-peek-mode 1)
-	    (lsp-bridge-peek--show))
-    (lsp-bridge-peek--show 'force)))
+(defun lsp-bridge-peek-references--return
+    (references-content references-counter session-id)
+  "Handle references for SESSION-ID and update its peek tree."
+  (when (lsp-bridge-peek--request-active-p session-id)
+    (when references-content
+      (with-temp-buffer
+        (insert references-content)
+        (goto-char (point-min))
+        (dotimes (_ references-counter)
+          (let ((line (buffer-substring (point) (line-end-position))))
+            (forward-line 1)
+            (let ((character (buffer-substring (point) (line-end-position))))
+              (forward-line 1)
+              (let ((filename (buffer-substring (point) (line-end-position))))
+                (forward-line 1)
+                (push filename (nth 1 lsp-bridge-peek-symbol-at-point))
+                (push (list :line (string-to-number line)
+                            :character (string-to-number character))
+                      (nth 2 lsp-bridge-peek-symbol-at-point))
+                (push (- (/ lsp-bridge-peek-file-content-height 2))
+                      (nth 6 lsp-bridge-peek-symbol-at-point)))))))
+      (setf (nth 1 lsp-bridge-peek-symbol-at-point)
+            (nreverse (nth 1 lsp-bridge-peek-symbol-at-point))
+            (nth 2 lsp-bridge-peek-symbol-at-point)
+            (nreverse (nth 2 lsp-bridge-peek-symbol-at-point))
+            (nth 6 lsp-bridge-peek-symbol-at-point)
+            (nreverse (nth 6 lsp-bridge-peek-symbol-at-point))))
+    (let ((origin-buffer (plist-get lsp-bridge-peek--active-request
+                                    :origin-buffer))
+          (origin-marker (plist-get lsp-bridge-peek--active-request
+                                    :origin-marker)))
+      (if (and (buffer-live-p origin-buffer)
+               origin-marker
+               (marker-position origin-marker))
+          (with-current-buffer origin-buffer
+            (save-excursion
+              (goto-char origin-marker)
+              (when lsp-bridge-peek-selected-symbol
+                (push (length lsp-bridge-peek-symbol-tree)
+                      (nth 4 (nth lsp-bridge-peek-selected-symbol
+                                  lsp-bridge-peek-symbol-tree)))
+                (unless (nth 5 (nth lsp-bridge-peek-selected-symbol
+                                    lsp-bridge-peek-symbol-tree))
+                  (setf (nth 5 (nth lsp-bridge-peek-selected-symbol
+                                      lsp-bridge-peek-symbol-tree)) 0)))
+              (setf (nth 3 lsp-bridge-peek-symbol-at-point)
+                    lsp-bridge-peek-selected-symbol
+                    (nth 5 lsp-bridge-peek-symbol-at-point) 0)
+              (setq lsp-bridge-peek-selected-symbol
+                    (length lsp-bridge-peek-symbol-tree))
+              (setq lsp-bridge-peek-symbol-tree
+                    (append lsp-bridge-peek-symbol-tree
+                            (list lsp-bridge-peek-symbol-at-point)))
+              (setq lsp-bridge-peek-symbol-at-point nil)
+              (if lsp-bridge-peek-mode
+                  (lsp-bridge-peek--show 'force)
+                (lsp-bridge-peek-mode 1)
+                (lsp-bridge-peek--show))))
+        (message "[LSP-Bridge] Peek origin buffer no longer exists.")))
+    (lsp-bridge-peek--cleanup-request session-id)))
 
 (defun lsp-bridge-peek--show (&optional force)
   "Show the peek window or deal with the update of contents in peek windows.
@@ -611,12 +730,28 @@ When FORCE if non-nil, the content of the peek window is recalculated."
 			                 border)))
       (setq lsp-bridge-peek--content-update nil))))
 
-(defun lsp-bridge-peek ()
-  "Peek the definition of the symbol at point."
+(defun lsp-bridge-peek (&optional session-id)
+  "Peek the definition of the symbol at point.
+SESSION-ID is supplied internally by `lsp-bridge-peek-through'."
   (interactive)
+  (unless session-id
+    (when lsp-bridge-peek--active-request
+      (user-error "A previous LSP peek request is still pending"))
+    (setq session-id (lsp-bridge-peek--next-request-id))
+    (setq lsp-bridge-peek--active-request
+          (list :id session-id
+                :origin-buffer (current-buffer)
+                :origin-marker (point-marker)
+                :origin-window (selected-window)
+                :target-buffer (current-buffer)
+                :target-marker (point-marker)))
+    (lsp-bridge-peek--arm-request-timeout session-id "definition"))
   (setq lsp-bridge-peek-symbol-at-point (make-list 7 nil))
   (setf (nth 0 lsp-bridge-peek-symbol-at-point) (symbol-at-point))
-  (lsp-bridge-call-file-api "peek_find_definition" (lsp-bridge--position)))
+  (unless (and (nth 0 lsp-bridge-peek-symbol-at-point)
+               (lsp-bridge-call-file-api
+                "peek_find_definition" (lsp-bridge--position) session-id))
+    (lsp-bridge-peek--request-failed nil session-id "definition")))
 
 (defun lsp-bridge-peek--error-if-not-peeking ()
   "Throw an error if not in a peek session."
@@ -781,13 +916,13 @@ The buffer and the point is returned in a cons cell."
 	     (pos-list (nth 2 selected-symbol))
 	     (content-move-list (nth 6 selected-symbol))
 	     (file (nth selected-id path-list))
-	     (buf (format "*lsp-bridge-peek-%s*" file))
+	     (buffer (lsp-bridge-peek--find-file-buffer file))
 	     (pos (nth selected-id pos-list))
 	     (content-move (nth selected-id content-move-list)))
     (setq lsp-bridge-peek--symbol-bounds
-	      (with-current-buffer buf
+	      (with-current-buffer buffer
 	        (save-excursion
-	          (goto-char (acm-backend-lsp-position-to-point pos))
+	          (goto-char (lsp-bridge-peek--position-to-point pos))
 		      (forward-line content-move)
 	          (beginning-of-line 1)
 	          (cons (point)
@@ -816,38 +951,39 @@ The buffer and the point is returned in a cons cell."
   "Peek through a symbol in current peek window."
   (interactive)
   (lsp-bridge-peek--error-if-not-peeking)
-  (setq lsp-bridge-peek-ace-list nil)
-  (setq lsp-bridge-peek-ace-list (make-list 5 nil))
-  (setf (nth 1 lsp-bridge-peek-ace-list)
-	    (point))
-  (setf (nth 2 lsp-bridge-peek-ace-list)
-	    (buffer-name))
+  (when lsp-bridge-peek--active-request
+    (user-error "A previous LSP peek request is still pending"))
   (with-temp-message ""
-    (let* ((file-pos (lsp-bridge-ace-pick-point-in-peek-window))
-	       (file (car file-pos))
-	       (pos (cdr file-pos)))
-      (setq temp-buf (find-buffer-visiting file))
-      (find-file file)
-      (save-excursion
-	    (goto-char pos)
-	    (setq lsp-bridge-peek-chosen-displaying-list (make-list 3 0))
-	    (setf (nth 2 lsp-bridge-peek-chosen-displaying-list) (1- lsp-bridge-peek-list-height))
-	    (lsp-bridge-peek)
-	    (setq single-character (eq
-				                (- (save-excursion
-				                     (forward-symbol 1)
-				                     (point))
-				                   (point))
-				                1))
-	    (setf (nth 4 lsp-bridge-peek-ace-list)
-	          (if single-character
-		          (point)
-		        (1+ (point)))))
-      (if (not temp-buf)
-	      (setf (nth 0 lsp-bridge-peek-ace-list)
-		        (buffer-name)))
-      (setf (nth 3 lsp-bridge-peek-ace-list) (buffer-name))))
-  (switch-to-buffer (nth 2 lsp-bridge-peek-ace-list)))
+    (when-let* ((file-pos (lsp-bridge-ace-pick-point-in-peek-window))
+                (file (car file-pos))
+                (pos (cdr file-pos)))
+      (let* ((origin-buffer (current-buffer))
+             (origin-marker (point-marker))
+             (existing-buffer (find-buffer-visiting file))
+             (target-buffer (or existing-buffer (find-file-noselect file)))
+             (session-id (lsp-bridge-peek--next-request-id)))
+        (with-current-buffer target-buffer
+          (save-excursion
+            (goto-char (min (max pos (point-min)) (point-max)))
+            (let ((target-marker (point-marker)))
+              (setq lsp-bridge-peek--active-request
+                    (list :id session-id
+                          :origin-buffer origin-buffer
+                          :origin-marker origin-marker
+                          :origin-window (selected-window)
+                          :target-buffer target-buffer
+                          :target-marker target-marker
+                          :temporary-buffer (unless existing-buffer
+                                              target-buffer)))
+              (lsp-bridge-peek--arm-request-timeout session-id "definition")
+              (setq lsp-bridge-peek-chosen-displaying-list (make-list 3 0))
+              (setf (nth 2 lsp-bridge-peek-chosen-displaying-list)
+                    (1- lsp-bridge-peek-list-height))
+              (condition-case err
+                  (lsp-bridge-peek session-id)
+                (error
+                 (lsp-bridge-peek--cleanup-request session-id)
+                 (signal (car err) (cdr err)))))))))))
 
 (defun lsp-bridge-peek-tree-previous-node ()
   "Select the previous node in the tree history."
