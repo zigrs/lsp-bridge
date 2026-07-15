@@ -6,33 +6,41 @@ REFERENCE_PATH = '\033[95m'
 REFERENCE_TEXT = '\033[94m'
 REFERENCE_ENDC = '\033[0m'
 
+
+def _parse_location(location):
+    file_uri = location["uri"] if "uri" in location else location["targetUri"]
+    location_range = location["range"] if "range" in location else location["targetRange"]
+    return uri_to_path(file_uri), location_range
+
+
 class FindImplementation(Handler):
     name = "find_implementation"
     method = "textDocument/implementation"
     cancel_on_change = True
+    cancel_on_cursor_change = False
 
     def process_request(self, position) -> dict:
         self.pos = position
         return dict(position=position)
 
-    def process_response(self, response: dict) -> None:
-        if response is None:
+    def process_response(self, response) -> None:
+        if not response:
             message_emacs("No implementation found")
-        elif len(response) == 1:
-            file_info = response[0]
-            fileuri = file_info["uri"] if "uri" in file_info else file_info["targetUri"]
-            filepath = uri_to_path(fileuri)
-            range = file_info["range"] if "range" in file_info else file_info["targetRange"]
-            startpos = range["start"]
+            return
+
+        locations = response if isinstance(response, list) else [response]
+        if len(locations) == 1:
+            filepath, location_range = _parse_location(locations[0])
+            startpos = location_range["start"]
             eval_in_emacs("lsp-bridge-define--jump", filepath, get_lsp_file_host(), startpos)
         else:
             references_dict = {}
-            for uri_info in response:
-                path = uri_to_path(uri_info["uri"])
+            for location in locations:
+                path, location_range = _parse_location(location)
                 if path in references_dict:
-                    references_dict[path].append(uri_info["range"])
+                    references_dict[path].append(location_range)
                 else:
-                    references_dict[path] = [uri_info["range"]]
+                    references_dict[path] = [location_range]
 
             references_counter = 0
             references_content = ""

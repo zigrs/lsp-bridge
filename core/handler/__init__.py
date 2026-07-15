@@ -9,6 +9,7 @@ class Handler(abc.ABC):
     name: str  # Name called by Emacs
     method: str  # Method name defined by LSP
     cancel_on_change = False  # Whether to cancel request on file change or cursor change
+    cancel_on_cursor_change = True
     send_document_uri = True
 
     def __init__(self, file_action: "FileAction"):
@@ -31,9 +32,14 @@ class Handler(abc.ABC):
                          request_id, self.latest_request_id)
             return
 
-        if self.cancel_on_change and self.last_change != self.file_action.last_change:
-            logger.debug("Discard response: file changed since last request")
-            return
+        if self.cancel_on_change:
+            current_change = self.file_action.last_change
+            if self.last_change[0] != current_change[0]:
+                logger.debug("Discard response: file changed since last request")
+                return
+            if self.cancel_on_cursor_change and self.last_change[1] != current_change[1]:
+                logger.debug("Discard response: cursor changed since last request")
+                return
 
         try:
             self.process_response(response)
