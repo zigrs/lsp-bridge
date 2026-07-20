@@ -348,19 +348,14 @@ If optional MARKER, return a marker instead"
       (acm-backend-lsp-insert-new-text (plist-get range :start) (plist-get range :end) (plist-get edit :newText)))))
 
 (defun acm-backend-lsp-make-sure-descending (edits)
-  "If `edits' is increasing, reverse `edits', otherwise the row inserted before will affect the position of the row inserted later."
-  (if (<= (length edits) 1)
-      ;; Return origin value of `edits' if length 0 or 1.
-      edits
-    (let* ((first-element-range (plist-get (nth 0 edits) :range))
-           (second-element-range (plist-get (nth 1 edits) :range))
-           (first-element-pos (acm-backend-lsp-position-to-point (plist-get first-element-range :start)))
-           (second-element-pos (acm-backend-lsp-position-to-point (plist-get second-element-range :start))))
-      (if (< first-element-pos second-element-pos)
-          ;; Only reverse edits if `edits' is increasing.
-          (reverse edits)
-        ;; Otherwise return origin value of `edits'.
-        edits))))
+  "Sort `edits' by start position in descending order.
+Applying later edits first prevents earlier edits from shifting their positions."
+  (sort (copy-sequence edits)
+        (lambda (edit-a edit-b)
+          (> (acm-backend-lsp-position-to-point
+              (plist-get (plist-get edit-a :range) :start))
+             (acm-backend-lsp-position-to-point
+              (plist-get (plist-get edit-b :range) :start))))))
 
 (defun acm-backend-lsp-snippet-expansion-fn ()
   "Compute a function to expand snippets.

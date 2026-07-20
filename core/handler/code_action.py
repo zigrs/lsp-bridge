@@ -25,6 +25,7 @@ class CodeAction(Handler):
     name = "code_action"
     method = "textDocument/codeAction"
     cancel_on_change = True
+    cancel_on_cursor_change = False
     provider = "code_action_provider"
     provider_message = "Current server not support code action."
 

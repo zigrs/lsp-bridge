@@ -355,8 +355,10 @@ Please read https://microsoft.github.io/language-server-protocol/specifications/
         (lsp-bridge-workspace-apply-edit argument temp-buffer)))
      ;; Command is string, send `workspace/executeCommand' request to LSP server. arguments are cached in Python side.
      ((stringp command)
-      ;; Execute command with temp-buffer.
-      (lsp-bridge-call-file-api "execute_command" server_name command arguments))
+      ;; Command actions cannot be previewed safely: executing one may edit the
+      ;; real workspace.  Only send it after the user selects the action.
+      (unless temp-buffer
+        (lsp-bridge-call-file-api "execute_command" server_name command arguments)))
      ;; Parse command argument if command is plist, and call `lsp-bridge-code-action--fix-do' again.
      ((lsp-bridge-plistp command)
       ;; We need add server-name in `next-action', otherwise `lsp-bridge-code-action--fix-do' will send empty server name to Python.
