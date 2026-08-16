@@ -2859,8 +2859,18 @@ SymbolKind (defined in the LSP)."
      ;; Make LSP server update full content.
      (lsp-bridge-call-file-api "update_file" (buffer-name))
      ;; Notify format complete.
-     (message "[LSP-BRIDGE] Complete code formatting.")
-     )))
+     (message "[LSP-BRIDGE] Complete code formatting."))
+   ;; `inhibit-modification-hooks' suppressed `after-change-functions'
+   ;; while the edits were applied, so font-lock/jit-lock (and packages
+   ;; piggybacking on their change notification, e.g. indent-bars-ts)
+   ;; never learned the text changed: after formatting, the buffer would
+   ;; keep stale or missing faces until the next manual edit.  Re-issue
+   ;; the change notification explicitly.  This only marks the buffer as
+   ;; unfontified (and re-arms indent-bars-ts's pending marker via
+   ;; `jit-lock-after-change-extend-region-functions'); the actual
+   ;; refontification still happens lazily on redisplay, so there is no
+   ;; extra UI cost on large files.
+   (jit-lock-after-change (point-min) (point-max) 0)))
 
 (defvar lsp-bridge-sdcv-helper-dict nil)
 
